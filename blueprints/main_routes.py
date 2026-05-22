@@ -105,6 +105,18 @@ def index():
     response.headers['Expires'] = '0'
     return response
 
+@main_bp.route('/mockup/procurement')
+def mockup_procurement():
+    """Statični mockup novega dizajna Naročila robe.
+    Dostopen brez prijave – samo za pregled in potrditev smeri preden se loti
+    redesign produkcijskih predlog. Vrne predogled v ločeni datoteki, da
+    obstoječi /index.html ostane nedotaknjen.
+    """
+    response = make_response(render_template('mockup_procurement.html'))
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
+
+
 @main_bp.route('/favicon.ico')
 def favicon():
     """Postreže favicon.ico iz mape static."""

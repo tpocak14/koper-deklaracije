@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mockup · Naročilo robe (novi dizajn)</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.1/font/bootstrap-icons.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --background:    oklch(0.992 0.003 286);
+    --foreground:    oklch(0.18 0.015 286);
+    --card:          oklch(1 0 0);
+    --card-fg:       oklch(0.16 0.015 286);
+    --primary:       oklch(0.26 0.038 280);
+    --primary-fg:    #fff;
+    --muted:         oklch(0.965 0.006 286);
+    --muted-fg:      oklch(0.52 0.018 286);
+    --accent:        oklch(0.955 0.008 286);
+    --border:        oklch(0.92 0.004 286);
+    --border-strong: oklch(0.86 0.005 286);
+    --ring:          oklch(0.62 0.06 280);
+    --success:       oklch(0.68 0.15 155);
+    --success-fg:    #fff;
+    --warning-bg:    oklch(0.96 0.06 82);
+    --warning-fg:    oklch(0.32 0.12 60);
+    --danger-bg:     oklch(0.94 0.06 27);
+    --danger-fg:     oklch(0.42 0.18 27);
+    --info-bg:       oklch(0.96 0.04 230);
+    --info-fg:       oklch(0.38 0.10 250);
+    --radius:        0.75rem;
+  }
+  html,body{ background: var(--background); color: var(--foreground); font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+  body{ -webkit-font-smoothing: antialiased; }
+  .glass-bar{
+    background: color-mix(in oklab, var(--background) 75%, transparent);
+    backdrop-filter: saturate(180%) blur(10px);
+    -webkit-backdrop-filter: saturate(180%) blur(10px);
+    border-bottom: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+  }
+  .card-xl{
+    background: var(--card);
+    border: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 2px rgba(15,23,42,0.04);
+  }
+  .text-muted{ color: var(--muted-fg); }
+  .bg-muted{ background: var(--muted); }
+  .text-fg{ color: var(--foreground); }
+  .badge{ display:inline-flex; align-items:center; gap:0.25rem; border-radius:9999px; padding:0.125rem 0.5rem; font-size:0.6875rem; font-weight:600; line-height:1.4; letter-spacing:0.01em; }
+  .badge-urgent{ background: var(--danger-bg); color: var(--danger-fg); border:1px solid color-mix(in oklab, var(--danger-fg) 25%, transparent); }
+  .badge-low{    background: var(--warning-bg); color: var(--warning-fg); border:1px solid color-mix(in oklab, var(--warning-fg) 25%, transparent); }
+  .badge-healthy{background: color-mix(in oklab, var(--success) 18%, white); color: oklch(0.38 0.13 155); border:1px solid color-mix(in oklab, var(--success) 35%, transparent); }
+  .badge-overstock{ background: var(--info-bg); color: var(--info-fg); border:1px solid color-mix(in oklab, var(--info-fg) 25%, transparent); }
+  .badge-unknown{ background: var(--muted); color: var(--muted-fg); border:1px solid var(--border); }
+  .badge-best{ background: oklch(0.94 0.08 50); color: oklch(0.42 0.15 50); border:1px solid color-mix(in oklab, oklch(0.42 0.15 50) 30%, transparent); }
+  .badge-supplier-mistral{ background: oklch(0.94 0.05 230); color: oklch(0.36 0.12 240); border:1px solid color-mix(in oklab, oklch(0.36 0.12 240) 25%, transparent); }
+  .badge-supplier-florgarden{ background: color-mix(in oklab, var(--success) 18%, white); color: oklch(0.38 0.13 155); border:1px solid color-mix(in oklab, var(--success) 35%, transparent); }
+  .kbd{ font-family: ui-monospace, "SF Mono", monospace; font-size: 0.6875rem; background: var(--card); border:1px solid var(--border); border-bottom-width: 2px; border-radius: 0.375rem; padding: 1px 6px; color: var(--muted-fg); }
+  .nav-pill{ display:inline-flex; align-items:center; gap:0.375rem; padding:0.4rem 0.75rem; border-radius:0.5rem; font-size:0.8125rem; font-weight:500; color: var(--muted-fg); transition: all 0.15s; }
+  .nav-pill:hover{ background: var(--accent); color: var(--foreground); }
+  .nav-pill[aria-current="page"]{ background: color-mix(in oklab, var(--primary) 8%, transparent); color: var(--primary); font-weight:600; }
+  .btn{ display:inline-flex; align-items:center; justify-content:center; gap:0.5rem; height:2.25rem; padding:0 0.875rem; border-radius:0.5rem; font-size:0.875rem; font-weight:500; transition: all 0.15s; white-space: nowrap; }
+  .btn-primary{ background: var(--primary); color: var(--primary-fg); box-shadow: 0 1px 2px rgba(15,23,42,0.08); }
+  .btn-primary:hover{ background: color-mix(in oklab, var(--primary) 90%, white); }
+  .btn-outline{ background: var(--card); border:1px solid var(--border-strong); color: var(--foreground); box-shadow: 0 1px 1px rgba(15,23,42,0.03); }
+  .btn-outline:hover{ background: var(--accent); }
+  .btn-ghost{ color: var(--muted-fg); }
+  .btn-ghost:hover{ background: var(--accent); color: var(--foreground); }
+  .btn-sm{ height: 2rem; padding: 0 0.625rem; font-size: 0.8125rem; }
+  .btn-xs{ height: 1.75rem; padding: 0 0.5rem; font-size: 0.75rem; gap:0.25rem; }
+  .input{ height: 2.25rem; padding: 0 0.75rem; border-radius: 0.5rem; border: 1px solid var(--border-strong); background: var(--card); font-size: 0.875rem; transition: all 0.15s; }
+  .input:focus{ outline: none; border-color: var(--ring); box-shadow: 0 0 0 3px color-mix(in oklab, var(--ring) 18%, transparent); }
+  .table-head th{ padding: 0.625rem 0.75rem; text-align:left; font-size: 0.6875rem; font-weight: 600; color: var(--muted-fg); text-transform: uppercase; letter-spacing: 0.06em; background: color-mix(in oklab, var(--muted) 60%, white); }
+  .table-row td{ padding: 0.625rem 0.75rem; font-size: 0.875rem; border-top: 1px solid color-mix(in oklab, var(--border) 70%, transparent); }
+  .table-row:hover{ background: color-mix(in oklab, var(--accent) 50%, transparent); }
+  .stat-tile{ background: var(--card); border:1px solid var(--border); border-radius: 0.75rem; padding: 1rem 1.125rem; }
+  .stat-label{ font-size: 0.6875rem; font-weight: 600; color: var(--muted-fg); text-transform: uppercase; letter-spacing: 0.07em; }
+  .stat-value{ font-size: 1.75rem; font-weight: 700; line-height: 1.1; letter-spacing: -0.02em; color: var(--foreground); margin-top: 0.25rem; font-variant-numeric: tabular-nums; }
+  .stat-trend-up{ color: oklch(0.42 0.13 155); }
+  .stat-trend-down{ color: oklch(0.45 0.18 27); }
+  .ring-accent{ box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 10%, transparent); }
+  .progress{ position: relative; height: 6px; border-radius: 9999px; background: var(--muted); overflow: hidden; }
+  .progress > span{ position:absolute; left:0; top:0; bottom:0; border-radius:9999px; }
+  .progress-urgent > span{ background: linear-gradient(90deg, oklch(0.55 0.21 27), oklch(0.62 0.20 25)); }
+  .progress-low > span{ background: linear-gradient(90deg, oklch(0.68 0.17 80), oklch(0.74 0.17 75)); }
+  .progress-healthy > span{ background: linear-gradient(90deg, oklch(0.55 0.16 155), oklch(0.62 0.15 150)); }
+  .progress-overstock > span{ background: linear-gradient(90deg, oklch(0.52 0.13 240), oklch(0.6 0.12 235)); }
+  details > summary{ list-style: none; cursor: pointer; }
+  details > summary::-webkit-details-marker{ display: none; }
+  /* Sparkline */
+  .spark{ display:block; }
+  /* mobile cards */
+  @media (max-width: 768px){
+    .desktop-only{ display: none; }
+  }
+  @media (min-width: 769px){
+    .mobile-only{ display: none; }
+  }
+  .mockup-banner{ background: linear-gradient(90deg, oklch(0.94 0.07 280), oklch(0.96 0.05 240)); border-bottom: 1px solid color-mix(in oklab, var(--primary) 25%, transparent); }
+</style>
+</head>
+<body>
+
+<!-- Mockup banner -->
+<div class="mockup-banner text-center text-xs py-2 px-4">
+  <span class="font-semibold" style="color: var(--primary);">MOCKUP</span>
+  <span class="text-muted ml-1">— statični predogled novega dizajna. Brez dejanske funkcionalnosti.</span>
+</div>
+
+<!-- Top bar -->
+<header class="glass-bar sticky top-0 z-40">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
+    <div class="flex items-center gap-2 shrink-0">
+      <div class="h-8 w-8 rounded-lg flex items-center justify-center font-bold text-sm" style="background: var(--primary); color: var(--primary-fg); letter-spacing:-0.05em;">A</div>
+      <div class="hidden sm:flex flex-col leading-tight">
+        <span class="text-[13px] font-semibold tracking-tight">AMOUR · Deklaracije</span>
+        <span class="text-[10px] uppercase tracking-widest text-muted">Nadzorna plošča</span>
+      </div>
+    </div>
+
+    <nav class="ml-4 flex items-center gap-0.5 overflow-x-auto">
+      <a href="#" class="nav-pill">Vnos</a>
+      <a href="#" class="nav-pill">Seznami</a>
+      <a href="#" class="nav-pill" aria-current="page"><i class="bi bi-truck text-[11px]"></i> Naročilo robe</a>
+      <a href="#" class="nav-pill">Statistika</a>
+      <a href="#" class="nav-pill">Predali</a>
+      <a href="#" class="nav-pill">Webhooki</a>
+      <a href="#" class="nav-pill">Nastavitve</a>
+    </nav>
+
+    <div class="ml-auto flex items-center gap-2 shrink-0">
+      <button class="btn btn-ghost btn-sm" title="Sinhronizacija"><i class="bi bi-arrow-repeat"></i><span class="hidden lg:inline">Sinhronizacija</span></button>
+      <a href="#" class="inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-medium" style="border-color: var(--border-strong); background: var(--card);">
+        <span class="inline-flex h-6 w-6 items-center justify-center rounded-full font-semibold" style="background: color-mix(in oklab, var(--primary) 12%, white); color: var(--primary);">TP</span>
+        <span class="hidden sm:inline">Tomaž</span>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 space-y-8">
+
+  <!-- Header -->
+  <section>
+    <p class="text-[11px] font-semibold uppercase tracking-widest text-muted">Naročilo robe</p>
+    <div class="mt-1 flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-fg">Pregled zaloge in priporočila za naročilo</h1>
+        <p class="text-sm text-muted mt-1 max-w-2xl">Avtomatsko priporočilo upošteva povprečno mesečno polnjenje v zadnjih 6 mesecih in trenutno zalogo v predalih. Možno ročno popraviti pred oddajo.</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <button class="btn btn-outline btn-sm" title="Predlagaj količine na osnovi statistike"><i class="bi bi-stars"></i> Avto-predlog (24 nujnih)</button>
+        <button class="btn btn-outline btn-sm"><i class="bi bi-cloud-arrow-down"></i> Prenesi template</button>
+        <button class="btn btn-outline btn-sm"><i class="bi bi-upload"></i> Uvozi (Excel)</button>
+        <button class="btn btn-primary btn-sm"><i class="bi bi-send"></i> Oddaj naročilo (€2.480)</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Supplier picker pills -->
+  <section class="flex flex-wrap items-center gap-2">
+    <span class="text-xs font-medium text-muted mr-1">Dobavitelj:</span>
+    <button class="nav-pill" aria-current="page" style="background: color-mix(in oklab, oklch(0.62 0.12 240) 12%, transparent); color: oklch(0.36 0.12 240); font-weight:600;">
+      Mistral
+      <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full" style="background: oklch(0.36 0.12 240); color:white;">142</span>
+    </button>
+    <button class="nav-pill">Florgarden <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-fg">86</span></button>
+    <button class="nav-pill">Aroma <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-fg">12</span></button>
+    <button class="nav-pill">Mali (ostali) <span class="ml-1 text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-fg">38</span></button>
+  </section>
+
+  <!-- KPI strip -->
+  <section class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+    <div class="stat-tile">
+      <div class="stat-label">Skupno SKU</div>
+      <div class="stat-value">142</div>
+      <div class="text-xs text-muted mt-1">v aktivnem katalogu Mistral</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-label">Pod minimumom</div>
+      <div class="stat-value" style="color: oklch(0.45 0.18 27);">31</div>
+      <div class="text-xs text-muted mt-1"><span class="stat-trend-up font-medium">+4</span> v zadnjih 7 dneh</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-label">Nujno naročiti</div>
+      <div class="stat-value" style="color: oklch(0.45 0.18 27);">24</div>
+      <div class="text-xs text-muted mt-1">top bestseller z &lt;1 mes. zaloge</div>
+    </div>
+    <div class="stat-tile">
+      <div class="stat-label">Predv. mes. potreba</div>
+      <div class="stat-value">€2.480</div>
+      <div class="text-xs text-muted mt-1">na osnovi povp. polnjenja 6m</div>
+    </div>
+  </section>
+
+  <!-- Sparkline / trend card -->
+  <section class="card-xl p-4 sm:p-5">
+    <div class="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <div class="stat-label">Polnjenja v zadnjih 12 tednih · Mistral</div>
+        <div class="flex items-baseline gap-3 mt-1">
+          <span class="text-2xl font-bold tracking-tight">827</span>
+          <span class="text-xs stat-trend-up font-medium"><i class="bi bi-arrow-up-right"></i> +12% vs. predhodnih 12 tednov</span>
+        </div>
+      </div>
+      <div class="flex gap-1.5 text-xs">
+        <button class="px-2 py-1 rounded-md bg-muted text-muted font-medium">12 tednov</button>
+        <button class="px-2 py-1 rounded-md text-muted hover:bg-muted">6 mesecev</button>
+        <button class="px-2 py-1 rounded-md text-muted hover:bg-muted">1 leto</button>
+      </div>
+    </div>
+    <!-- Sparkline area chart -->
+    <svg viewBox="0 0 600 100" preserveAspectRatio="none" class="w-full h-24 mt-4">
+      <defs>
+        <linearGradient id="sparkfill" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stop-color="oklch(0.55 0.16 280)" stop-opacity="0.35"/>
+          <stop offset="100%" stop-color="oklch(0.55 0.16 280)" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      <path d="M0,72 L50,68 L100,75 L150,55 L200,60 L250,42 L300,50 L350,30 L400,38 L450,22 L500,28 L550,18 L600,14 L600,100 L0,100 Z" fill="url(#sparkfill)"/>
+      <path d="M0,72 L50,68 L100,75 L150,55 L200,60 L250,42 L300,50 L350,30 L400,38 L450,22 L500,28 L550,18 L600,14" fill="none" stroke="oklch(0.45 0.16 280)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="600" cy="14" r="3.5" fill="oklch(0.45 0.16 280)"/>
+    </svg>
+    <div class="flex justify-between text-[10px] text-muted mt-1">
+      <span>3.1.</span><span>17.1.</span><span>31.1.</span><span>14.2.</span><span>28.2.</span><span>14.3.</span><span>danes</span>
+    </div>
+  </section>
+
+  <!-- Filter / search row -->
+  <section class="card-xl p-3 sm:p-4 flex flex-wrap items-center gap-2 sm:gap-3">
+    <div class="relative flex-1 min-w-[220px]">
+      <i class="bi bi-search absolute left-3 top-1/2 -translate-y-1/2 text-muted text-sm"></i>
+      <input type="text" placeholder="Išči po imenu, SKU ali product no..." class="input pl-9 w-full">
+    </div>
+    <select class="input text-sm">
+      <option>Vsi statusi</option>
+      <option>🚨 Nujno</option>
+      <option>⚠ Nizka zaloga</option>
+      <option>✓ Zdravo</option>
+      <option>📦 Overstock</option>
+    </select>
+    <label class="inline-flex items-center gap-2 text-sm text-muted whitespace-nowrap">
+      <input type="checkbox" class="w-4 h-4 rounded" style="accent-color: var(--primary);"> Samo bestseller
+    </label>
+    <label class="inline-flex items-center gap-2 text-sm text-muted whitespace-nowrap">
+      <input type="checkbox" class="w-4 h-4 rounded" checked style="accent-color: var(--primary);"> Skrij brez naročila
+    </label>
+    <div class="ml-auto hidden lg:flex items-center gap-1.5 text-xs text-muted">
+      <span class="kbd">/</span> iskanje
+      <span class="kbd">↑↓</span> premik
+      <span class="kbd">↵</span> shrani
+      <span class="kbd">Esc</span> zapri
+    </div>
+  </section>
+
+  <!-- Stock table desktop -->
+  <section class="card-xl overflow-hidden desktop-only">
+    <table class="w-full">
+      <thead class="table-head">
+        <tr>
+          <th class="w-12"><input type="checkbox" class="w-4 h-4 rounded" style="accent-color: var(--primary);"></th>
+          <th>Parfum</th>
+          <th class="text-right">Predal</th>
+          <th class="text-right">Povp. /mes</th>
+          <th class="text-right">Mes. zaloge</th>
+          <th>Status</th>
+          <th class="w-32 text-right">Trend (12t)</th>
+          <th class="w-32">Naročilo</th>
+          <th class="text-right">Vrednost</th>
+        </tr>
+      </thead>
+      <tbody>
+
+        <!-- Row: urgent bestseller -->
+        <tr class="table-row">
+          <td><input type="checkbox" class="w-4 h-4 rounded" checked style="accent-color: var(--primary);"></td>
+          <td>
+            <div class="flex items-start gap-2">
+              <div class="min-w-0">
+                <div class="font-medium truncate flex items-center gap-1.5">M-104 · La Vie Est Belle
+                  <span class="badge badge-best" title="Top 50 bestseller">★</span>
+                </div>
+                <div class="text-xs text-muted">Mistral · 100ml · SKU AMP-M104</div>
+              </div>
+            </div>
+          </td>
+          <td class="text-right tabular-nums"><span class="font-semibold">0</span><span class="text-muted text-xs"> / min 3</span></td>
+          <td class="text-right tabular-nums font-medium">12.4</td>
+          <td class="text-right tabular-nums">
+            <div class="font-semibold" style="color: oklch(0.45 0.18 27);">0.0</div>
+            <div class="progress progress-urgent mt-1.5"><span style="width:4%"></span></div>
+          </td>
+          <td><span class="badge badge-urgent"><i class="bi bi-exclamation-triangle-fill text-[9px]"></i> Nujno</span></td>
+          <td>
+            <svg viewBox="0 0 80 24" class="spark w-full h-6 ml-auto">
+              <polyline points="0,18 10,16 20,14 30,15 40,10 50,12 60,8 70,5 80,3" fill="none" stroke="oklch(0.55 0.21 27)" stroke-width="1.5"/>
+            </svg>
+          </td>
+          <td>
+            <div class="flex items-center gap-1">
+              <input type="number" value="12" class="input w-16 text-right tabular-nums" style="height:1.875rem;">
+              <span class="text-[10px] text-muted">predl.</span>
+            </div>
+          </td>
+          <td class="text-right tabular-nums font-medium">€204</td>
+        </tr>
+
+        <!-- Row: urgent (not bestseller) -->
+        <tr class="table-row">
+          <td><input type="checkbox" class="w-4 h-4 rounded" checked style="accent-color: var(--primary);"></td>
+          <td>
+            <div class="font-medium">M-217 · Aventus EDP</div>
+            <div class="text-xs text-muted">Mistral · 50ml · SKU AMP-M217</div>
+          </td>
+          <td class="text-right tabular-nums"><span class="font-semibold">1</span><span class="text-muted text-xs"> / min 4</span></td>
+          <td class="text-right tabular-nums font-medium">8.2</td>
+          <td class="text-right tabular-nums">
+            <div class="font-semibold" style="color: oklch(0.45 0.18 27);">0.1</div>
+            <div class="progress progress-urgent mt-1.5"><span style="width:8%"></span></div>
+          </td>
+          <td><span class="badge badge-urgent"><i class="bi bi-exclamation-triangle-fill text-[9px]"></i> Nujno</span></td>
+          <td>
+            <svg viewBox="0 0 80 24" class="spark w-full h-6 ml-auto">
+              <polyline points="0,12 10,14 20,10 30,11 40,8 50,9 60,7 70,5 80,6" fill="none" stroke="oklch(0.55 0.21 27)" stroke-width="1.5"/>
+            </svg>
+          </td>
+          <td>
+            <div class="flex items-center gap-1">
+              <input type="number" value="8" class="input w-16 text-right tabular-nums" style="height:1.875rem;">
+            </div>
+          </td>
+          <td class="text-right tabular-nums font-medium">€144</td>
+        </tr>
+
+        <!-- Row: low -->
+        <tr class="table-row">
+          <td><input type="checkbox" class="w-4 h-4 rounded" checked style="accent-color: var(--primary);"></td>
+          <td>
+            <div class="font-medium flex items-center gap-1.5">M-058 · Sauvage EDT
+              <span class="badge badge-best" title="Top 50 bestseller">★</span>
+            </div>
+            <div class="text-xs text-muted">Mistral · 100ml · SKU AMP-M058</div>
+          </td>
+          <td class="text-right tabular-nums"><span class="font-semibold">2</span><span class="text-muted text-xs"> / min 3</span></td>
+          <td class="text-right tabular-nums font-medium">5.6</td>
+          <td class="text-right tabular-nums">
+            <div class="font-semibold" style="color: oklch(0.50 0.15 75);">0.4</div>
+            <div class="progress progress-low mt-1.5"><span style="width:18%"></span></div>
+          </td>
+          <td><span class="badge badge-low"><i class="bi bi-circle-fill text-[7px]"></i> Nizka zaloga</span></td>
+          <td>
+            <svg viewBox="0 0 80 24" class="spark w-full h-6 ml-auto">
+              <polyline points="0,15 10,13 20,16 30,12 40,11 50,9 60,12 70,10 80,8" fill="none" stroke="oklch(0.55 0.16 75)" stroke-width="1.5"/>
+            </svg>
+          </td>
+          <td>
+            <input type="number" value="6" class="input w-16 text-right tabular-nums" style="height:1.875rem;">
+          </td>
+          <td class="text-right tabular-nums font-medium">€108</td>
+        </tr>
+
+        <!-- Row: healthy -->
+        <tr class="table-row">
+          <td><input type="checkbox" class="w-4 h-4 rounded" style="accent-color: var(--primary);"></td>
+          <td>
+            <div class="font-medium">M-082 · Black Opium</div>
+            <div class="text-xs text-muted">Mistral · 50ml · SKU AMP-M082</div>
+          </td>
+          <td class="text-right tabular-nums"><span class="font-semibold">5</span><span class="text-muted text-xs"> / min 3</span></td>
+          <td class="text-right tabular-nums font-medium">3.1</td>
+          <td class="text-right tabular-nums">
+            <div class="font-semibold" style="color: oklch(0.42 0.13 155);">1.6</div>
+            <div class="progress progress-healthy mt-1.5"><span style="width:60%"></span></div>
+          </td>
+          <td><span class="badge badge-healthy"><i class="bi bi-check2 text-[9px]"></i> Zdravo</span></td>
+          <td>
+            <svg viewBox="0 0 80 24" class="spark w-full h-6 ml-auto">
+              <polyline points="0,12 10,11 20,13 30,12 40,12 50,11 60,13 70,12 80,11" fill="none" stroke="oklch(0.55 0.16 155)" stroke-width="1.5"/>
+            </svg>
+          </td>
+          <td>
+            <input type="number" value="0" class="input w-16 text-right tabular-nums text-muted" style="height:1.875rem;">
+          </td>
+          <td class="text-right tabular-nums text-muted">—</td>
+        </tr>
+
+        <!-- Row: overstock -->
+        <tr class="table-row">
+          <td><input type="checkbox" class="w-4 h-4 rounded" style="accent-color: var(--primary);"></td>
+          <td>
+            <div class="font-medium">M-301 · Limited Oud Royal</div>
+            <div class="text-xs text-muted">Mistral · 100ml · SKU AMP-M301</div>
+          </td>
+          <td class="text-right tabular-nums"><span class="font-semibold">8</span><span class="text-muted text-xs"> / min 2</span></td>
+          <td class="text-right tabular-nums font-medium">1.2</td>
+          <td class="text-right tabular-nums">
+            <div class="font-semibold" style="color: oklch(0.38 0.10 250);">6.7</div>
+            <div class="progress progress-overstock mt-1.5"><span style="width:100%"></span></div>
+          </td>
+          <td><span class="badge badge-overstock"><i class="bi bi-box-seam text-[9px]"></i> Overstock</span></td>
+          <td>
+            <svg viewBox="0 0 80 24" class="spark w-full h-6 ml-auto">
+              <polyline points="0,10 10,12 20,11 30,13 40,12 50,14 60,13 70,15 80,14" fill="none" stroke="oklch(0.5 0.12 240)" stroke-width="1.5"/>
+            </svg>
+          </td>
+          <td>
+            <input type="number" value="0" class="input w-16 text-right tabular-nums text-muted" style="height:1.875rem;">
+          </td>
+          <td class="text-right tabular-nums text-muted">—</td>
+        </tr>
+
+        <!-- Row: slow mover (warning) -->
+        <tr class="table-row" style="background: color-mix(in oklab, var(--warning-bg) 30%, transparent);">
+          <td><input type="checkbox" class="w-4 h-4 rounded" style="accent-color: var(--primary);"></td>
+          <td>
+            <div class="font-medium flex items-center gap-1.5">M-415 · Niche Vetiver Reserve
+              <span class="badge badge-low" title="Že 84 dni brez polnjenja — preveri vrč"><i class="bi bi-exclamation-circle"></i> 84 dni</span>
+            </div>
+            <div class="text-xs text-muted">Mistral · 100ml · SKU AMP-M415 · zadnje polnjenje 02.01.2026</div>
+          </td>
+          <td class="text-right tabular-nums"><span class="font-semibold">0</span><span class="text-muted text-xs"> / min 1</span></td>
+          <td class="text-right tabular-nums font-medium">0.4</td>
+          <td class="text-right tabular-nums">
+            <div class="font-semibold text-muted">—</div>
+            <div class="text-[10px] text-muted">premalo podatkov</div>
+          </td>
+          <td><span class="badge badge-unknown" title="Slow mover z 0 polnjenji 84 dni — preveri vrč"><i class="bi bi-eye text-[9px]"></i> Preveri vrč</span></td>
+          <td>
+            <svg viewBox="0 0 80 24" class="spark w-full h-6 ml-auto">
+              <polyline points="0,18 10,18 20,18 30,18 40,18 50,18 60,18 70,18 80,18" fill="none" stroke="oklch(0.6 0.04 286)" stroke-width="1.5" stroke-dasharray="2 2"/>
+            </svg>
+          </td>
+          <td>
+            <input type="number" value="0" class="input w-16 text-right tabular-nums text-muted" style="height:1.875rem;">
+          </td>
+          <td class="text-right tabular-nums text-muted">—</td>
+        </tr>
+
+      </tbody>
+      <tfoot>
+        <tr class="bg-muted">
+          <td colspan="8" class="px-3 py-2.5 text-xs text-muted">Prikazanih <strong class="text-fg">6</strong> od 142 SKU · filtri aktivni: <span class="badge badge-unknown">Skrij brez naročila</span></td>
+          <td class="px-3 py-2.5 text-right text-sm font-semibold tabular-nums">€456</td>
+        </tr>
+      </tfoot>
+    </table>
+  </section>
+
+  <!-- Mobile cards -->
+  <section class="space-y-3 mobile-only">
+    <div class="card-xl p-4">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0">
+          <div class="font-semibold flex items-center gap-1.5">M-104 · La Vie Est Belle <span class="badge badge-best">★</span></div>
+          <div class="text-xs text-muted">SKU AMP-M104 · 100ml</div>
+        </div>
+        <span class="badge badge-urgent shrink-0"><i class="bi bi-exclamation-triangle-fill text-[9px]"></i> Nujno</span>
+      </div>
+      <div class="grid grid-cols-3 gap-2 mt-3">
+        <div class="bg-muted rounded-md px-2 py-1.5">
+          <div class="text-[9px] uppercase tracking-wider text-muted font-semibold">Predal</div>
+          <div class="text-base font-bold tabular-nums">0<span class="text-[10px] text-muted font-normal"> / 3</span></div>
+        </div>
+        <div class="bg-muted rounded-md px-2 py-1.5">
+          <div class="text-[9px] uppercase tracking-wider text-muted font-semibold">Povp/mes</div>
+          <div class="text-base font-bold tabular-nums">12.4</div>
+        </div>
+        <div class="bg-muted rounded-md px-2 py-1.5">
+          <div class="text-[9px] uppercase tracking-wider text-muted font-semibold">Mes. zal.</div>
+          <div class="text-base font-bold tabular-nums" style="color: oklch(0.45 0.18 27);">0.0</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-2 mt-3">
+        <input type="number" value="12" class="input flex-1 text-right tabular-nums">
+        <span class="text-xs text-muted">€204</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Two-column: Bestseller + Slow movers -->
+  <section class="grid lg:grid-cols-2 gap-4 sm:gap-6">
+
+    <!-- Top bestsellers -->
+    <div class="card-xl p-4 sm:p-5">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-semibold tracking-tight">Top 10 bestseller (6 mes.)</h3>
+          <p class="text-xs text-muted">Najpogosteje polnjenih parfumov Mistral</p>
+        </div>
+        <a href="#" class="text-xs font-medium" style="color: var(--primary);">Vsi top 50 →</a>
+      </div>
+      <ol class="mt-4 space-y-2">
+        <li class="flex items-center gap-3">
+          <span class="w-6 text-center text-xs font-semibold text-muted">1</span>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium truncate">M-104 · La Vie Est Belle</div>
+            <div class="progress mt-1"><span class="progress-healthy" style="width:100%; background: oklch(0.45 0.16 280);"></span></div>
+          </div>
+          <span class="text-sm font-semibold tabular-nums">74</span>
+        </li>
+        <li class="flex items-center gap-3">
+          <span class="w-6 text-center text-xs font-semibold text-muted">2</span>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium truncate">M-058 · Sauvage EDT</div>
+            <div class="progress mt-1"><span style="width:82%; background: oklch(0.50 0.14 280);"></span></div>
+          </div>
+          <span class="text-sm font-semibold tabular-nums">61</span>
+        </li>
+        <li class="flex items-center gap-3">
+          <span class="w-6 text-center text-xs font-semibold text-muted">3</span>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium truncate">M-217 · Aventus EDP</div>
+            <div class="progress mt-1"><span style="width:66%; background: oklch(0.55 0.13 280);"></span></div>
+          </div>
+          <span class="text-sm font-semibold tabular-nums">49</span>
+        </li>
+        <li class="flex items-center gap-3">
+          <span class="w-6 text-center text-xs font-semibold text-muted">4</span>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium truncate">M-021 · Coco Mademoiselle</div>
+            <div class="progress mt-1"><span style="width:58%; background: oklch(0.58 0.12 280);"></span></div>
+          </div>
+          <span class="text-sm font-semibold tabular-nums">43</span>
+        </li>
+        <li class="flex items-center gap-3">
+          <span class="w-6 text-center text-xs font-semibold text-muted">5</span>
+          <div class="flex-1 min-w-0">
+            <div class="text-sm font-medium truncate">M-178 · Y EDP</div>
+            <div class="progress mt-1"><span style="width:50%; background: oklch(0.60 0.11 280);"></span></div>
+          </div>
+          <span class="text-sm font-semibold tabular-nums">37</span>
+        </li>
+      </ol>
+    </div>
+
+    <!-- Slow movers -->
+    <div class="card-xl p-4 sm:p-5">
+      <div class="flex items-center justify-between">
+        <div>
+          <h3 class="text-base font-semibold tracking-tight">Slow movers (preveri vrč)</h3>
+          <p class="text-xs text-muted">≥ 60 dni brez polnjenja, predal prazen</p>
+        </div>
+        <span class="badge badge-low">8 SKU</span>
+      </div>
+      <ul class="mt-4 space-y-2.5">
+        <li class="flex items-center justify-between gap-3 p-2.5 rounded-md border" style="border-color: var(--border); background: color-mix(in oklab, var(--warning-bg) 25%, transparent);">
+          <div class="min-w-0">
+            <div class="text-sm font-medium truncate">M-415 · Niche Vetiver Reserve</div>
+            <div class="text-xs text-muted">Zadnjič 02.01.2026 · <strong style="color: var(--warning-fg);">84 dni</strong></div>
+          </div>
+          <button class="btn btn-outline btn-xs">+ V naročilo</button>
+        </li>
+        <li class="flex items-center justify-between gap-3 p-2.5 rounded-md border" style="border-color: var(--border); background: color-mix(in oklab, var(--warning-bg) 25%, transparent);">
+          <div class="min-w-0">
+            <div class="text-sm font-medium truncate">M-389 · Oud Wood Intense</div>
+            <div class="text-xs text-muted">Zadnjič 18.01.2026 · <strong style="color: var(--warning-fg);">68 dni</strong></div>
+          </div>
+          <button class="btn btn-outline btn-xs">+ V naročilo</button>
+        </li>
+        <li class="flex items-center justify-between gap-3 p-2.5 rounded-md border" style="border-color: var(--border);">
+          <div class="min-w-0">
+            <div class="text-sm font-medium truncate">M-512 · Saffron Royale</div>
+            <div class="text-xs text-muted">Zadnjič 25.01.2026 · 61 dni</div>
+          </div>
+          <button class="btn btn-outline btn-xs">+ V naročilo</button>
+        </li>
+        <li class="flex items-center justify-between gap-3 p-2.5 rounded-md border" style="border-color: var(--border);">
+          <div class="min-w-0">
+            <div class="text-sm font-medium truncate">M-433 · Rose Absolue</div>
+            <div class="text-xs text-muted">Zadnjič 28.01.2026 · 58 dni</div>
+          </div>
+          <button class="btn btn-outline btn-xs">+ V naročilo</button>
+        </li>
+      </ul>
+    </div>
+
+  </section>
+
+  <!-- Oddana naročila history -->
+  <section>
+    <div class="flex items-end justify-between mb-3">
+      <div>
+        <h2 class="text-lg font-semibold tracking-tight">Oddana naročila</h2>
+        <p class="text-xs text-muted">Zgodovina po dobavitelju s povprečnim dobavnim rokom</p>
+      </div>
+      <select class="input text-sm">
+        <option>Vsi statusi</option>
+        <option>Oddano</option>
+        <option>Delno prejeto</option>
+        <option>Prejeto</option>
+      </select>
+    </div>
+    <div class="card-xl overflow-hidden">
+      <table class="w-full">
+        <thead class="table-head">
+          <tr>
+            <th>PO #</th>
+            <th>Dobavitelj</th>
+            <th>Status</th>
+            <th>Ustvarjeno</th>
+            <th class="text-right">Postavke</th>
+            <th class="text-right">Naročeno</th>
+            <th class="text-right">Prejeto</th>
+            <th class="text-right">Dobavni rok</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="table-row">
+            <td class="font-mono text-xs">PO-2026-058</td>
+            <td><span class="badge badge-supplier-mistral">Mistral</span></td>
+            <td><span class="badge badge-healthy">Prejeto</span></td>
+            <td class="text-muted text-xs">22.03.2026 14:12</td>
+            <td class="text-right tabular-nums">28</td>
+            <td class="text-right tabular-nums font-medium">142</td>
+            <td class="text-right tabular-nums font-medium">142</td>
+            <td class="text-right tabular-nums">3 dni</td>
+            <td class="text-right"><button class="btn btn-ghost btn-xs"><i class="bi bi-three-dots"></i></button></td>
+          </tr>
+          <tr class="table-row">
+            <td class="font-mono text-xs">PO-2026-057</td>
+            <td><span class="badge badge-supplier-florgarden">Florgarden</span></td>
+            <td><span class="badge badge-low">Delno prejeto</span></td>
+            <td class="text-muted text-xs">18.03.2026 09:48</td>
+            <td class="text-right tabular-nums">14</td>
+            <td class="text-right tabular-nums font-medium">68</td>
+            <td class="text-right tabular-nums font-medium">52</td>
+            <td class="text-right tabular-nums">7 dni</td>
+            <td class="text-right"><button class="btn btn-ghost btn-xs"><i class="bi bi-three-dots"></i></button></td>
+          </tr>
+          <tr class="table-row">
+            <td class="font-mono text-xs">PO-2026-056</td>
+            <td><span class="badge badge-supplier-mistral">Mistral</span></td>
+            <td><span class="badge badge-overstock">Oddano</span></td>
+            <td class="text-muted text-xs">14.03.2026 16:33</td>
+            <td class="text-right tabular-nums">42</td>
+            <td class="text-right tabular-nums font-medium">218</td>
+            <td class="text-right tabular-nums text-muted">—</td>
+            <td class="text-right tabular-nums text-muted">—</td>
+            <td class="text-right"><button class="btn btn-ghost btn-xs"><i class="bi bi-three-dots"></i></button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="mt-3 text-xs text-muted">
+      <strong>Povp. dobavni rok Mistral:</strong> 3.2 dni · <strong>Florgarden:</strong> 6.8 dni · <strong>Aroma:</strong> 11 dni
+    </div>
+  </section>
+
+</main>
+
+<footer class="mt-12 border-t" style="border-color: var(--border);">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-6 text-xs text-muted">
+    Mockup novega dizajna · AMOUR Deklaracije · <a href="/" class="font-medium" style="color: var(--primary);">← nazaj na app</a>
+  </div>
+</footer>
+
+</body>
+</html>
