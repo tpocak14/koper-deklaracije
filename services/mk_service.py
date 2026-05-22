@@ -2497,11 +2497,12 @@ def _to_int_quantity(val) -> int:
 
 
 def _apply_procurement_from_bill(c, bill: Dict[str, Any]):
-    """Increment procurement pending by bill product amounts for non MISTRAL/FLORGARDEN SKUs.
+    """Decrement procurement on_hand by bill product amounts for non MISTRAL/FLORGARDEN SKUs.
 
     - Uses proc_products.sku to match imported items
-    - Excludes suppliers named MISTRAL or FLORGARDEN (case-insensitive)
+    - Excludes suppliers named MISTRAL or FLORGARDEN (perfumes use perfumes_stock)
     - Idempotent via proc_applied_from_mk (mk_id, sku)
+    - Writes audit entry to proc_stock_movements via services.proc_stock helper
     """
     try:
         # Only apply for published bills
@@ -2539,7 +2540,6 @@ def _apply_procurement_from_bill(c, bill: Dict[str, Any]):
                     pass
                 continue
             raw_qty = _to_int_quantity(it.get('quantity') or it.get('qty') or it.get('amount'))
-            # Upoštevaj strogo količino na računu; ne uporabljaj absolutne vrednosti stock delta
             qty = int(raw_qty)
             if qty <= 0:
                 continue
@@ -2548,77 +2548,58 @@ def _apply_procurement_from_bill(c, bill: Dict[str, Any]):
         if not sku_to_qty:
             return
 
-        # For each SKU, skip if already applied for this bill
+        from services.proc_stock import apply_decrement
+
         for sku, qty in sku_to_qty.items():
             c.execute("SELECT 1 FROM proc_applied_from_mk WHERE mk_id = %s AND sku = %s", (mk_id, sku))
             if c.fetchone():
                 continue
-            # Find matching procurement products and suppliers
+            res = apply_decrement(
+                c, sku, int(qty),
+                source='mk_bill', source_ref=mk_id,
+                note=f"bill {mk_id}"
+            )
+            if not res.get('applied'):
+                continue
             c.execute(
                 """
-                SELECT pp.supplier_id, ps.name
-                FROM proc_products pp
-                JOIN proc_suppliers ps ON ps.id = pp.supplier_id
-                WHERE UPPER(pp.sku) = %s
+                INSERT INTO proc_applied_from_mk (mk_id, sku, qty)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (mk_id, sku) DO NOTHING
                 """,
-                (sku,)
+                (mk_id, sku, int(qty))
             )
-            rows = c.fetchall() or []
-            if not rows:
-                continue
-            applied_any = False
-            for r in rows:
-                supplier_id = r['supplier_id'] if isinstance(r, dict) else r[0]
-                supplier_name = (r['name'] if isinstance(r, dict) else r[1]) or ''
-                sup_upper = supplier_name.strip().upper()
-                if sup_upper in ('MISTRAL', 'FLORGARDEN'):
-                    continue
-                # Apply increment to pending
-                c.execute(
-                    """
-                    UPDATE proc_products
-                    SET pending = pending + %s, updated_at = NOW()
-                    WHERE supplier_id = %s AND sku = %s
-                    """,
-                    (int(qty), int(supplier_id), sku)
-                )
-                applied_any = True
-            if applied_any:
-                # Record idempotency
-                c.execute(
-                    """
-                    INSERT INTO proc_applied_from_mk (mk_id, sku, qty)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (mk_id, sku) DO NOTHING
-                    """,
-                    (mk_id, sku, int(qty))
-                )
-                try:
-                    app_log('procurement.apply', 'info', 'Pending increment', {
-                        'mk_id': mk_id,
-                        'sku': sku,
-                        'qty': int(qty),
-                        'supplier_skipped': False
-                    })
-                except Exception:
-                    pass
+            try:
+                app_log('procurement.apply', 'info', 'on_hand decrement (mk_bill)', {
+                    'mk_id': mk_id,
+                    'sku': sku,
+                    'qty': int(qty),
+                    'on_hand_before': res.get('on_hand_before'),
+                    'on_hand_after': res.get('on_hand_after'),
+                    'pending_before': res.get('pending_before'),
+                    'pending_after': res.get('pending_after'),
+                })
+            except Exception:
+                pass
     except Exception as e:
         current_app.logger.error(f"apply procurement from MK bill error: {e}")
 
 
 def mk_apply_procurement_from_stock_list(stock_list):
-    """Apply procurement increments directly from MK stock webhook stock_list.
+    """Apply procurement on_hand decrement directly from MK stock webhook stock_list.
 
     - Only applies when amount < 0 (stock decrease / sale)
     - Matches on `proc_products.sku`
-    - Skips suppliers MISTRAL and FLORGARDEN
+    - Skips suppliers MISTRAL and FLORGARDEN (perfumes use perfumes_stock)
     - Idempotent by (mk_id, sku) using `proc_applied_from_mk`
-    Returns number of updated rows (by supplier rows updated).
+    - Writes audit entry to proc_stock_movements via services.proc_stock helper
+    Returns number of products decremented.
     """
     try:
         if not isinstance(stock_list, list) or not stock_list:
             return 0
         from database import get_db
+        from services.proc_stock import apply_decrement
         db = get_db(); c = db.cursor()
         _ensure_procurement_tables(c)
         _ensure_proc_applied_table(c)
@@ -2640,36 +2621,15 @@ def mk_apply_procurement_from_stock_list(stock_list):
                 c.execute("SELECT 1 FROM proc_applied_from_mk WHERE mk_id = %s AND sku = %s", (mk_id, sku))
                 if c.fetchone():
                     continue
-            c.execute(
-                """
-                SELECT pp.supplier_id, ps.name
-                FROM proc_products pp
-                JOIN proc_suppliers ps ON ps.id = pp.supplier_id
-                WHERE pp.sku = %s
-                """,
-                (sku,)
+            res = apply_decrement(
+                c, sku, int(qty),
+                source='mk_stock_webhook', source_ref=mk_id or None,
+                note='mk stock webhook'
             )
-            rows = c.fetchall() or []
-            if not rows:
+            if not res.get('applied'):
                 continue
-            applied_any = False
-            for r in rows:
-                supplier_id = r['supplier_id'] if isinstance(r, dict) else r[0]
-                supplier_name = (r['name'] if isinstance(r, dict) else r[1]) or ''
-                sup_upper = supplier_name.strip().upper()
-                if sup_upper in ('MISTRAL', 'FLORGARDEN'):
-                    continue
-                c.execute(
-                    """
-                    UPDATE proc_products
-                    SET pending = pending + %s, updated_at = NOW()
-                    WHERE supplier_id = %s AND sku = %s
-                    """,
-                    (int(qty), int(supplier_id), sku)
-                )
-                applied_any = True
-                total_updates += 1
-            if applied_any and mk_id:
+            total_updates += 1
+            if mk_id:
                 c.execute(
                     """
                     INSERT INTO proc_applied_from_mk (mk_id, sku, qty)
@@ -2678,14 +2638,18 @@ def mk_apply_procurement_from_stock_list(stock_list):
                     """,
                     (mk_id, sku, int(qty))
                 )
-                try:
-                    app_log('procurement.apply', 'info', 'Pending increment (webhook.stock)', {
-                        'mk_id': mk_id,
-                        'sku': sku,
-                        'qty': int(qty),
-                    })
-                except Exception:
-                    pass
+            try:
+                app_log('procurement.apply', 'info', 'on_hand decrement (mk_stock_webhook)', {
+                    'mk_id': mk_id,
+                    'sku': sku,
+                    'qty': int(qty),
+                    'on_hand_before': res.get('on_hand_before'),
+                    'on_hand_after': res.get('on_hand_after'),
+                    'pending_before': res.get('pending_before'),
+                    'pending_after': res.get('pending_after'),
+                })
+            except Exception:
+                pass
         db.commit(); c.close()
         return total_updates
     except Exception as e:

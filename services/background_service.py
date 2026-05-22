@@ -534,33 +534,56 @@ def reconcile_missing_declarations(hours_back: int = 72, limit: int = 500) -> di
                             (order_number, f"#{str(order_number).replace('#','')}")
                         )
                         updated += 1
-            # Sync MK attachment if missing
-            if order_data.get('mk_decl_uploaded_at') is None:
+            # Sync MK attachment if missing.
+            #
+            # IMPORTANT: do NOT call `sync_mk_declaration_uploads(order_numbers=[...])`
+            # here. It performs many sequential MK API calls per order (each with
+            # 5 retries) and, when called in a loop over up to 500 orders, can
+            # take tens of minutes while holding a DB connection — eventually
+            # exhausting the Postgres role connection pool and bringing the app
+            # down. The nightly retail/declaration delta jobs cover the same
+            # workload in a controlled batch.
+            #
+            # We attempt only the cheap `mk_attach_declaration_for_order` here
+            # (when the PDF is already present) and record the check timestamp.
+            if order_data.get('mk_decl_uploaded_at') is None and order_data.get('pdf_generated_at'):
                 try:
-                    from services.mk_service import mk_attach_declaration_for_order, sync_mk_declaration_uploads
-                    if order_data.get('pdf_generated_at'):
-                        attach_res = mk_attach_declaration_for_order(
-                            str(order_number),
-                            shopify_order_id=order_data.get('shopify_order_id'),
-                            mk_bill_id=order_data.get('mk_bill_id'),
-                            mk_bill_type=order_data.get('mk_bill_type'),
+                    from services.mk_service import mk_attach_declaration_for_order
+                    attach_res = mk_attach_declaration_for_order(
+                        str(order_number),
+                        shopify_order_id=order_data.get('shopify_order_id'),
+                        mk_bill_id=order_data.get('mk_bill_id'),
+                        mk_bill_type=order_data.get('mk_bill_type'),
+                    )
+                    if attach_res.get("success"):
+                        cursor.execute(
+                            """
+                            UPDATE orders
+                            SET mk_decl_uploaded_at = CURRENT_TIMESTAMP,
+                                mk_decl_upload_checked_at = NOW()
+                            WHERE order_number = %s OR order_number = %s
+                            """,
+                            (order_number, f"#{str(order_number).replace('#','')}")
                         )
-                        if attach_res.get("success"):
-                            cursor.execute(
-                                """
-                                UPDATE orders
-                                SET mk_decl_uploaded_at = CURRENT_TIMESTAMP,
-                                    mk_decl_upload_checked_at = NOW()
-                                WHERE order_number = %s OR order_number = %s
-                                """,
-                                (order_number, f"#{str(order_number).replace('#','')}")
-                            )
-                        else:
-                            sync_mk_declaration_uploads(order_numbers=[str(order_number)])
                     else:
-                        sync_mk_declaration_uploads(order_numbers=[str(order_number)])
+                        # Only record that we tried — defer the expensive MK lookup
+                        # to the nightly batch sync.
+                        cursor.execute(
+                            """
+                            UPDATE orders
+                            SET mk_decl_upload_checked_at = NOW()
+                            WHERE order_number = %s OR order_number = %s
+                            """,
+                            (order_number, f"#{str(order_number).replace('#','')}")
+                        )
                 except Exception as se:
-                    current_app.logger.error(f"BACKGROUND: MK sync error for {order_number}: {se}")
+                    current_app.logger.error(f"BACKGROUND: MK attach error for {order_number}: {se}")
+                # Commit per-order so the connection does not stay idle in
+                # transaction across many slow MK calls.
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
 
         # Second pass: stale missing-data orders (older than hours_back)
         cursor.execute(

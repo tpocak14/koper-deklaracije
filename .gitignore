@@ -26,3 +26,51 @@ __pycache__/
 
 # Crash report od filter-repo
 .git/fast_import_crash_*
+
+# Python virtualno okolje
+.venv/
+venv/
+env/
+
+# Shopify tema - NI del te aplikacije
+shopify-theme/
+
+# Baza podatkov - PRAVI PODATKI, ne na GitHub
+*.db
+declarations.db
+
+# Excel s podatki
+*.xlsm
+*.xlsx
+
+# Zacasne/log/stare datoteke
+last_modified.txt
+last_refresh.txt
+Brez naslova.txt
+app.txt
+
+# Shopify tema - NI del te aplikacije
+shopify-theme/
+
+# Baza podatkov - PRAVI PODATKI, ne na GitHub
+*.db
+declarations.db
+
+# Excel s podatki
+*.xlsm
+*.xlsx
+
+# Zacasne/log/stare datoteke
+last_modified.txt
+last_refresh.txt
+Brez naslova.txt
+app.txt
+
+# Orodja / IDE
+.qodo/
+
+# Heroku klon za primerjavo
+HEROKU-verzija/
+
+# Generirane deklaracije (PDF) - ne sodijo v Git
+pdf/

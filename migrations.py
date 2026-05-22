@@ -243,6 +243,7 @@ def run_migrations():
             ('019_add_min_on_hand.sql', '019'),
             ('020_add_shopify_stores.sql', '020'),
             ('021_add_search_rewrite.sql', '021'),
+            ('022_proc_stock_audit.sql', '022'),
         ]
         
         for migration_file, version in migrations:

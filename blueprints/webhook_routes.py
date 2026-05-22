@@ -19,6 +19,273 @@ from services.shopify_service import (
     _get_api_url,
     _get_shopify_headers,
 )
+from services.proc_stock import (
+    apply_decrement as _proc_apply_decrement,
+    apply_revert as _proc_apply_revert,
+    PERFUME_SUPPLIERS as _PROC_PERFUME_SUPPLIERS,
+)
+
+
+def _ensure_shopify_idempotency_table(c):
+    try:
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS proc_applied_from_shopify (
+                shop_domain TEXT NOT NULL,
+                event_type  TEXT NOT NULL,
+                event_id    TEXT NOT NULL,
+                line_item_id TEXT NOT NULL,
+                sku         TEXT NOT NULL,
+                qty         INTEGER NOT NULL,
+                applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (shop_domain, event_type, event_id, line_item_id, sku)
+            );
+            """
+        )
+    except Exception as e:
+        try:
+            current_app.logger.warning(f"_ensure_shopify_idempotency_table: {e}")
+        except Exception:
+            pass
+
+
+def _iter_proc_line_items(line_items):
+    """Yield (line_item_id, sku, qty, vendor) for line items eligible for
+    procurement decrement (i.e. non-empty SKU + non-perfume vendor).
+    """
+    if not isinstance(line_items, list):
+        return
+    for item in line_items:
+        if not isinstance(item, dict):
+            continue
+        sku = str(item.get('sku') or '').strip()
+        if not sku:
+            continue
+        vendor = (item.get('vendor') or '').strip()
+        if vendor and vendor.upper() in _PROC_PERFUME_SUPPLIERS:
+            continue
+        try:
+            qty = int(item.get('quantity') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            continue
+        line_item_id = str(item.get('id') or item.get('line_item_id') or sku)
+        yield line_item_id, sku, qty, vendor
+
+
+def _apply_shopify_decrement(c, payload, *, shop_domain, event_type):
+    """Decrement proc_products.on_hand for non-perfume line items in a paid order."""
+    if not isinstance(payload, dict):
+        return 0
+    event_id = str(payload.get('id') or payload.get('order_id') or '')
+    if not event_id:
+        return 0
+    line_items = payload.get('line_items') or []
+    if not line_items:
+        return 0
+
+    shop = shop_domain or ''
+    _ensure_shopify_idempotency_table(c)
+
+    applied_count = 0
+    for line_item_id, sku, qty, vendor in _iter_proc_line_items(line_items):
+        try:
+            c.execute(
+                """
+                SELECT 1 FROM proc_applied_from_shopify
+                WHERE shop_domain = %s AND event_type = %s
+                  AND event_id = %s AND line_item_id = %s AND sku = %s
+                """,
+                (shop, event_type, event_id, line_item_id, sku),
+            )
+            if c.fetchone():
+                continue
+
+            res = _proc_apply_decrement(
+                c, sku, qty,
+                source=f'shopify_{event_type}',
+                source_ref=event_id,
+                supplier_hint=vendor or None,
+                note=f"order={payload.get('name') or event_id}",
+            )
+            if not res.get('applied'):
+                continue
+            c.execute(
+                """
+                INSERT INTO proc_applied_from_shopify
+                    (shop_domain, event_type, event_id, line_item_id, sku, qty)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                """,
+                (shop, event_type, event_id, line_item_id, sku, int(qty)),
+            )
+            applied_count += 1
+            try:
+                current_app.logger.info(
+                    f"webhook/{event_type} stock decrement sku={sku} qty={qty} "
+                    f"on_hand={res.get('on_hand_before')}->{res.get('on_hand_after')} "
+                    f"pending={res.get('pending_before')}->{res.get('pending_after')}"
+                )
+            except Exception:
+                pass
+        except Exception as e:
+            try:
+                current_app.logger.error(
+                    f"webhook/{event_type} apply error sku={sku} qty={qty}: {e}"
+                )
+            except Exception:
+                pass
+    return applied_count
+
+
+def _apply_shopify_revert_order(c, payload, *, shop_domain, event_type):
+    """Return all decrement quantities for an order back to on_hand
+    (orders/cancelled).
+    """
+    if not isinstance(payload, dict):
+        return 0
+    event_id = str(payload.get('id') or payload.get('order_id') or '')
+    if not event_id:
+        return 0
+    shop = shop_domain or ''
+    _ensure_shopify_idempotency_table(c)
+
+    # Find prior decrement events for this order (paid, fulfilled, ...) that
+    # have not yet been reverted by a matching `cancel` row.
+    c.execute(
+        """
+        SELECT line_item_id, sku, qty
+        FROM proc_applied_from_shopify
+        WHERE shop_domain = %s
+          AND event_id = %s
+          AND event_type IN ('orders/paid', 'orders/fulfilled')
+        """,
+        (shop, event_id),
+    )
+    prior = c.fetchall() or []
+    if not prior:
+        return 0
+
+    reverted = 0
+    for row in prior:
+        line_item_id = row['line_item_id'] if isinstance(row, dict) else row[0]
+        sku = row['sku'] if isinstance(row, dict) else row[1]
+        qty = int(row['qty'] if isinstance(row, dict) else row[2])
+        # Skip if already reverted for this event_type
+        c.execute(
+            """
+            SELECT 1 FROM proc_applied_from_shopify
+            WHERE shop_domain = %s AND event_type = %s
+              AND event_id = %s AND line_item_id = %s AND sku = %s
+            """,
+            (shop, event_type, event_id, line_item_id, sku),
+        )
+        if c.fetchone():
+            continue
+        res = _proc_apply_revert(
+            c, sku, qty,
+            source=f'shopify_{event_type}',
+            source_ref=event_id,
+            note=f"cancel order={event_id}",
+        )
+        if not res.get('applied'):
+            continue
+        c.execute(
+            """
+            INSERT INTO proc_applied_from_shopify
+                (shop_domain, event_type, event_id, line_item_id, sku, qty)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (shop, event_type, event_id, line_item_id, sku, qty),
+        )
+        reverted += 1
+    return reverted
+
+
+def _apply_shopify_refund(c, payload, *, shop_domain):
+    """Partial revert for refunds/create webhook.
+
+    Shopify refund payload contains `refund_line_items[*].line_item_id` and
+    `quantity`. We need to look up the original line item to find sku + vendor.
+    """
+    if not isinstance(payload, dict):
+        return 0
+    refund_id = str(payload.get('id') or '')
+    order_id = str(payload.get('order_id') or '')
+    if not refund_id or not order_id:
+        return 0
+
+    shop = shop_domain or ''
+    _ensure_shopify_idempotency_table(c)
+
+    refund_items = payload.get('refund_line_items') or []
+    line_items_raw = payload.get('line_items') or []
+    by_id = {}
+    for li in line_items_raw:
+        if isinstance(li, dict) and li.get('id'):
+            by_id[str(li.get('id'))] = li
+    # Some payloads only carry refund_line_items with embedded line_item
+    for rli in refund_items:
+        if isinstance(rli, dict):
+            li = rli.get('line_item')
+            if isinstance(li, dict) and li.get('id'):
+                by_id.setdefault(str(li.get('id')), li)
+
+    reverted = 0
+    for rli in refund_items:
+        if not isinstance(rli, dict):
+            continue
+        try:
+            qty = int(rli.get('quantity') or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            continue
+        li_id = str(rli.get('line_item_id') or '')
+        if not li_id:
+            continue
+        li = by_id.get(li_id) or {}
+        sku = (li.get('sku') or '').strip()
+        vendor = (li.get('vendor') or '').strip()
+        if not sku:
+            continue
+        if vendor and vendor.upper() in _PROC_PERFUME_SUPPLIERS:
+            continue
+        # Idempotency keyed by refund id to allow multiple refunds per order
+        event_type = 'refunds/create'
+        event_id = refund_id
+        c.execute(
+            """
+            SELECT 1 FROM proc_applied_from_shopify
+            WHERE shop_domain = %s AND event_type = %s
+              AND event_id = %s AND line_item_id = %s AND sku = %s
+            """,
+            (shop, event_type, event_id, li_id, sku),
+        )
+        if c.fetchone():
+            continue
+        res = _proc_apply_revert(
+            c, sku, qty,
+            source='shopify_refund',
+            source_ref=f"refund={refund_id}, order={order_id}",
+            supplier_hint=vendor or None,
+            note=f"refund {refund_id}",
+        )
+        if not res.get('applied'):
+            continue
+        c.execute(
+            """
+            INSERT INTO proc_applied_from_shopify
+                (shop_domain, event_type, event_id, line_item_id, sku, qty)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            (shop, event_type, event_id, li_id, sku, qty),
+        )
+        reverted += 1
+    return reverted
 
 # Globalne spremenljivke za sledenje webhook naročil
 last_webhook_order = None
@@ -588,6 +855,52 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                             """,
                             (na_zalogi, product_details['product_no'], product_details['proizvajalec_id'].upper())
                         )
+
+            elif topic == 'orders/paid':
+                # Decrement proc_products.on_hand for non-perfume line items.
+                # Triggered on payment so the inventory is accurate even before
+                # fulfillment. Idempotent via proc_applied_from_shopify.
+                try:
+                    n = _apply_shopify_decrement(
+                        cursor, payload,
+                        shop_domain=shop_domain, event_type='orders/paid',
+                    )
+                    if n:
+                        current_app.logger.info(
+                            f"webhook/orders/paid: applied stock decrement for {n} item(s)"
+                        )
+                except Exception as e:
+                    current_app.logger.error(f"webhook/orders/paid stock decrement error: {e}")
+                    traceback.print_exc()
+
+            elif topic == 'orders/cancelled':
+                # Return any previously-decremented stock back to on_hand.
+                try:
+                    n = _apply_shopify_revert_order(
+                        cursor, payload,
+                        shop_domain=shop_domain, event_type='orders/cancelled',
+                    )
+                    if n:
+                        current_app.logger.info(
+                            f"webhook/orders/cancelled: reverted stock for {n} item(s)"
+                        )
+                except Exception as e:
+                    current_app.logger.error(f"webhook/orders/cancelled revert error: {e}")
+                    traceback.print_exc()
+
+            elif topic == 'refunds/create':
+                try:
+                    n = _apply_shopify_refund(
+                        cursor, payload, shop_domain=shop_domain,
+                    )
+                    if n:
+                        current_app.logger.info(
+                            f"webhook/refunds/create: reverted stock for {n} item(s)"
+                        )
+                except Exception as e:
+                    current_app.logger.error(f"webhook/refunds/create error: {e}")
+                    traceback.print_exc()
+
             db.commit()
         except Exception as e:
             db.rollback()

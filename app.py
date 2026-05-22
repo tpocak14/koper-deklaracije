@@ -106,12 +106,22 @@ def create_app():
             with app.app_context():
                 try:
                     from services.background_service import reconcile_missing_declarations
-                    result = reconcile_missing_declarations(hours_back=72, limit=500)
+                    rec_limit = int(os.environ.get('RECONCILE_LIMIT', '50') or 50)
+                    rec_hours = int(os.environ.get('RECONCILE_HOURS_BACK', '24') or 24)
+                    result = reconcile_missing_declarations(hours_back=rec_hours, limit=rec_limit)
                     app.logger.info(f"Declaration reconcile: {result}")
                 except Exception as e:
                     app.logger.error(f"Napaka pri deklaracijskem reconciliation jobu: {e}")
 
-        scheduler.add_job(declaration_reconcile_job, 'interval', minutes=60)
+        # Kill switch: set DISABLE_RECONCILE_JOB=1 (or DISABLE_BG_JOBS=1) on Heroku
+        # to stop the hourly reconciliation entirely without a code deploy.
+        _disable_all = (os.environ.get('DISABLE_BG_JOBS', '') or '').strip().lower() in ('1', 'true', 'yes')
+        _disable_reconcile = _disable_all or (os.environ.get('DISABLE_RECONCILE_JOB', '') or '').strip().lower() in ('1', 'true', 'yes')
+        if not _disable_reconcile:
+            _interval_min = int(os.environ.get('RECONCILE_INTERVAL_MIN', '60') or 60)
+            scheduler.add_job(declaration_reconcile_job, 'interval', minutes=_interval_min)
+        else:
+            app.logger.warning("declaration_reconcile_job DISABLED via env (DISABLE_BG_JOBS / DISABLE_RECONCILE_JOB)")
         
         # Nočni import MK računov (vsak dan ob 03:15)
         def sync_mk_bills_job():
