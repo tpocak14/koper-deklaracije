@@ -1,0 +1,50 @@
+.ts-wrapper.single { position: relative; }
+.ts-control input[role="combobox"] { width: 100%; outline: none; border: none; background: transparent; }
+.ts-dropdown { background: #fff; border: 1px solid #e5e7eb; border-radius: 0.5rem; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -4px rgba(0,0,0,0.1); max-height: 18rem; overflow-y: auto; }
+.ts-option { padding: 0.75rem; cursor: pointer; border-bottom: 1px solid #f3f4f6; }
+.ts-option:last-child { border-bottom: none; }
+.ts-option:hover, .ts-option.active { background: #f9fafb; }
+.ts-option.loading, .ts-option.error, .ts-option.empty { color: #6b7280; font-style: italic; cursor: default; }
+.ts-option.error { color: #dc2626; }
+
+/* KPI cards: on small screens make them more compact and close to squares */
+.kpi-card { min-height: 88px; display: flex; flex-direction: column; justify-content: center; }
+@media (max-width: 768px) {
+  /* Make KPI cards square on mobile */
+  .kpi-card {
+    min-height: 0;
+    aspect-ratio: 1 / 1;
+  }
+  /* Tighter modal content spacing on mobile */
+  #workerDetailsModal .kpi-card .text-2xl { font-size: 1.5rem; }
+  #workerDetailsModal .kpi-card .text-xs { font-size: 0.7rem; }
+  #workerDetailsModal .kpi-card .text-sm { font-size: 0.8rem; }
+}
+
+/* Desktop: allow vertical scroll for long series table; keep header sticky */
+#serije-section .overflow-auto { scrollbar-gutter: stable both-edges; }
+#serije-section thead.sticky { backdrop-filter: blur(2px); }
+
+/* Scroll buttons for desktop navigation */
+/* Removed scroll buttons in favor of native overflow-x-auto */
+
+/* Desktop tabs navigation - hide scrollbars but allow programmatic scrolling */
+@media (min-width: 1024px) {
+    #main-tabs {
+        -webkit-overflow-scrolling: touch;
+        user-select: none;
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+    }
+    #main-tabs::-webkit-scrollbar {
+        display: none;
+    }
+    #main-tabs * {
+        user-select: none;
+        -webkit-user-select: none;
+        -moz-user-select: none;
+        -ms-user-select: none;
+    }
+}
+

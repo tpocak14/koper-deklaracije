@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+    <meta charset="UTF-8">
+    <title>Deklaracija za Tisk</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        @media print {
+            body {
+                width: 72mm;
+                font-size: 8pt;
+                margin: 0;
+                padding: 0;
+            }
+        }
+        
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 9pt;
+            line-height: 1.4;
+            margin: 0;
+            padding: 5px;
+            color: #000;
+            background-color: #fff;
+            word-wrap: break-word;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        
+        .perfume-block {
+            padding-top: 10px;
+            padding-bottom: 10px;
+            margin-bottom: 10px;
+            border-bottom: 1px dashed #000;
+        }
+        
+        .perfume-block:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+        }
+        
+        .header {
+            font-family: 'Inter', sans-serif;
+            font-weight: 700;
+            text-align: center;
+            text-transform: uppercase;
+            font-size: 11pt;
+            margin-bottom: 6px;
+            letter-spacing: 0.5px;
+        }
+        
+        .label {
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-top: 10px;
+            margin-bottom: 3px;
+            display: block;
+            font-size: 8pt;
+            letter-spacing: 0.3px;
+        }
+        
+        .content {
+            font-family: 'Inter', sans-serif;
+            font-weight: 400;
+            margin: 0;
+            padding-left: 2px;
+            line-height: 1.3;
+        }
+        
+        .warning {
+            margin-top: 10px;
+            font-family: 'Inter', sans-serif;
+            font-weight: 500;
+        }
+        
+        .footer {
+            margin-top: 10px;
+            font-family: 'Inter', sans-serif;
+            font-weight: 400;
+        }
+        
+        /* Posebna pisava za serijske številke in datume */
+        .serial-number, .expiry-date {
+            font-family: 'JetBrains Mono', 'Courier New', monospace;
+            font-weight: 500;
+            letter-spacing: 0.5px;
+        }
+    </style>
+</head>
+<body onload="window.print(); window.close();">
+    {% for perfume in perfumes %}
+    <div class="perfume-block">
+        <div class="header">DEKLARACIJA ZA PARFUM ŠT. {{ perfume.id_parfuma }}</div>
+
+        {% if perfume.proizvajalec == 'mistral' %}
+            <span class="label">Proizvajalec:</span>
+            <div class="content">
+                Mistral, Ul. Grunwaldzka 172,<br>
+                43-600 Jaworzno, Poljska
+            </div>
+            <span class="label">Distributer:</span>
+            <div class="content">
+                PARFUMI MISTRAL, d.o.o.,<br>
+                Brdinje 91/a, 2390 Ravne na Koroškem
+            </div>
+        {% elif perfume.proizvajalec == 'florgarden' %}
+            <span class="label">Proizvajalec:</span>
+            <div class="content">
+                FLORGARDEN ltd., 2129 Sofia,<br>
+                Industrial zone Verila
+            </div>
+            <span class="label">Distributer:</span>
+            <div class="content">
+                AMOUR Parfums, Tomas Pocak, s.p.,<br>
+                Ledavsko naselje 16, 9000 Murska Sobota
+            </div>
+        {% endif %}
+
+        <span class="label">Sestavine (INCI):</span>
+        <div class="content">{{ perfume.sestava_inci }}</div>
+
+        <div class="warning">
+            <span class="label">Opozorilo:</span>
+            {% if perfume.proizvajalec == 'mistral' %}
+                <div class="content">Ni užitno, shranjujte stran od otrok.</div>
+            {% elif perfume.proizvajalec == 'florgarden' %}
+                <div class="content">Vnetljivo! Hraniti stran od ognja! Preprečiti stik z očmi! Hraniti izven dosega otrok!</div>
+            {% endif %}
+        </div>
+
+        <div class="footer">
+            {% if perfume.proizvajalec == 'mistral' %}
+                <span class="label">Uporabno do:</span>
+                <div class="content expiry-date">{{ perfume.rok_uporabe }}</div>
+                <div class="content">(Datum uporabe je hkrati serijska številka)</div>
+            {% else %}
+                <span class="label">Uporabno do:</span>
+                <div class="content expiry-date">{{ perfume.rok_uporabe }}</div>
+                <span class="label">Serijska št.:</span>
+                <div class="content serial-number">{{ perfume.serijska_stevilka }}</div>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+</body>
+</html>
+</qodoArtifact>

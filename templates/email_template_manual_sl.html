@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+    <title>Varnostna deklaracija za vaš nakup | AMOUR Parfums</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #f4f4f4; font-family: Arial, sans-serif; }
+        table { border-spacing: 0; }
+        td { padding: 0; }
+        img { border: 0; }
+    </style>
+</head>
+<body>
+    <center style="width: 100%; table-layout: fixed; background-color: #f6f9fb; padding: 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-spacing:0;">
+            <tr>
+                <td align="center" style="padding: 24px 16px 60px;">
+                    <table width="600" cellpadding="0" cellspacing="0" role="presentation" style="background-color: #ffffff; width:100%; max-width: 600px; border-spacing: 0; color: #333333; font-family: Arial, sans-serif; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); overflow: hidden;">
+            <!-- Header with Logo - CORRECTED FOR BETTER COMPATIBILITY -->
+            <tr>
+                <td style="padding: 20px; text-align: center; background-color: #ffffff;">
+                    <table align="center" border="0" cellpadding="0" cellspacing="0" width="180" bgcolor="#ffffff" style="background-color:#ffffff; border-radius:12px;">
+                        <tr>
+                            <td align="center" style="padding:12px;">
+                                <a href="{{ store_url }}" target="_blank" style="text-decoration:none;">
+                                    <img src="cid:logo" alt="AMOUR Parfums Logo" width="150" style="display:block; width:150px; max-width:150px; height:auto; background-color:#ffffff;">
+                                </a>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+                <td style="padding: 32px 40px; text-align: left; line-height: 1.6;">
+                    <h2 style="font-size: 22px; margin: 0 0 8px 0;">Varnostna deklaracija za vaš nakup</h2>
+                    <p>Spoštovani,</p>
+                    <p>zahvaljujemo se vam za vaš nakup v naši poslovalnici. V priponki vam pošiljamo varnostno-tehnično deklaracijo za kupljene izdelke:</p>
+                    
+                    <div style="margin-top: 16px; border: 1px solid #e5e7eb; border-radius: 12px; overflow: hidden;">
+                        {% for item in items %}
+                        <div style="padding: 14px 16px; text-align: left; {% if not loop.last %}border-bottom: 1px solid #e5e7eb;{% endif %} background-color: #fafafa;">
+                            <strong style="color: #0f172a; font-size: 14px;">{{ item.title }}</strong>
+                        </div>
+                        {% endfor %}
+                    </div>
+
+                    <!-- Opomba o ročnem vnosu podatkov -->
+                    <p style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eeeeee; font-size: 12px; font-style: italic; color: #666666; line-height: 1.5;">
+                        <strong>Opomba:</strong> Deklaracija in rok uporabe sta bila generirana avtomatsko na podlagi internih evidenc, ki se vodijo ročno. Kljub skrbnemu nadzoru lahko redko pride do nepravilnosti. Če opazite morebitno napako, vas vljudno prosimo, da nas o tem obvestite – z veseljem bomo preverili in po potrebi ustrezno popravili podatke.
+                    </p>
+                </td>
+            </tr>
+
+            <!-- CTA Button -->
+            <tr>
+                <td style="padding: 20px 40px 40px; text-align: center;">
+                    <table align="center" border="0" cellspacing="0" cellpadding="0">
+                        <tr>
+                            <td>
+                                <a href="{{ store_url }}" target="_blank" style="background-color: #555555; color: #ffffff !important; padding: 12px 20px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block;">Obiščite našo spletno stran</a>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+                <td style="background-color: #f6f9fb;">
+                    <table width="100%">
+                        <tr>
+                            <td style="text-align: center; font-size: 12px; color: #94a3b8; padding: 20px 0;">
+                                <p style="margin: 0;">Lep pozdrav,<br>Ekipa AMOUR Parfums</p>
+                                <p style="margin-top: 10px;">&copy; {{ current_year }} AMOUR Parfums. Vse pravice pridržane.</p>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </center>
+</body>
+</html>
+</qodoArtifact>

@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+    <title>Dichiarazione di sicurezza per il tuo ordine | AMOUR Parfums</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #f6f9fb; font-family: Arial, sans-serif; color: #0f172a; }
+        table { border-spacing: 0; }
+        td { padding: 0; }
+        img { border: 0; display: block; }
+        .card { background:#ffffff; margin:0 auto; width:100%; max-width:600px; border-spacing:0; color:#333333; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); overflow: hidden; }
+        .container { padding: 32px 40px; text-align:left; line-height:1.6; }
+        .section-title { font-size: 18px; margin: 30px 0 10px 0; padding-bottom: 10px; border-bottom:2px solid #eeeeee; }
+        .btn { display:inline-block; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; color:#ffffff !important; }
+    </style>
+</head>
+<body>
+    <center style="width: 100%; table-layout: fixed; background-color: #f6f9fb; padding: 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-spacing:0;">
+            <tr>
+                <td align="center" style="padding: 24px 16px 60px;">
+                    <table class="card" width="600" cellpadding="0" cellspacing="0" role="presentation" style="width:100%; max-width:600px; border-spacing:0;">
+            <!-- Header with Logo -->
+            <tr>
+                <td style="padding: 20px; text-align: center; background-color: #ffffff;" bgcolor="#ffffff" data-ogsc="rgb(255,255,255)" data-ogsb="rgb(255,255,255)">
+                    <table align="center" border="0" cellpadding="0" cellspacing="0" width="180" bgcolor="#ffffff" style="background-color:#ffffff; border-radius:12px;">
+                        <tr>
+                            <td align="center" style="padding:12px;" bgcolor="#ffffff">
+                                <a href="{{ store_url }}" target="_blank" style="text-decoration:none;">
+                                    <!--[if gte mso 9]>
+                                    <img src="cid:logo" alt="AMOUR Parfums Logo" width="150" style="display:block;border:0;">
+                                    <![endif]-->
+                                    <!--[if !mso]><!-- -->
+                                    <img src="{{ logo_url }}" alt="AMOUR Parfums Logo" width="150" style="display:block; width:150px; max-width:150px; height:auto; background-color:#ffffff; border:8px solid #ffffff; border-radius:8px;">
+                                    <!--<![endif]-->
+                                </a>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+                <td class="container">
+                    <h2 style="font-size: 22px; margin: 0 0 8px 0;">Dichiarazione di sicurezza per il tuo ordine</h2>
+                    <p style="margin: 0 0 10px 0;">Gentile Cliente,</p>
+                    <p style="margin: 0;">Grazie per il tuo acquisto. In allegato, ti inviamo la scheda di dati di sicurezza per i prodotti del tuo <strong>ordine n. {{ order_number }}</strong>.</p>
+                    
+                    <h3 style="font-size: 18px; margin-top: 30px; border-bottom: 2px solid #eeeeee; padding-bottom: 10px;">Riepilogo dell'ordine</h3>
+                    <table style="width: 100%; margin-top: 12px; border-collapse: collapse;">
+                        {% for item in items %}
+                        <tr>
+                            <td style="padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; vertical-align: middle;">
+                                <img src="{{ item.image_url }}" alt="{{ item.title }}" width="60" height="60" style="width: 60px; height: 60px; object-fit: cover; border-radius: 8px; margin-right: 15px;">
+                            </td>
+                            <td style="padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; vertical-align: middle;">
+                                <div style="font-weight: 600; color: #0f172a;">{{ item.title }}</div>
+                                <div style="font-size: 12px; color: #64748b; margin-top: 2px;">Quantità: {{ item.quantity }}</div>
+                            </td>
+                            <td style="padding: 12px; text-align: right; border-bottom: 1px solid #e5e7eb; white-space: nowrap; vertical-align: middle;">{{ "%.2f"|format(item.price|float) }} €</td>
+                        </tr>
+                        {% endfor %}
+                    </table>
+
+                    <!-- NOVO: Opomba o ročnem vnosu podatkov -->
+                    <p style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eeeeee; font-size: 12px; font-style: italic; color: #666666; line-height: 1.5;">
+                        <strong>Nota:</strong> La dichiarazione e la data di scadenza sono state generate automaticamente sulla base di registrazioni interne gestite manualmente. Nonostante un attento controllo, raramente possono verificarsi delle imprecisioni. Se notate un possibile errore, vi preghiamo gentilmente di informarci: saremo lieti di verificare e, se necessario, correggere i dati.
+                    </p>
+                </td>
+            </tr>
+
+            <!-- CTA Buttons -->
+            <tr>
+                <td style="padding: 20px 40px 40px; text-align: center;">
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center">
+                        <tr>
+                            <td align="center" bgcolor="#ff746b" style="border-radius:10px;" bgcolor="#ff746b">
+                                <a href="{{ status_url }}" target="_blank" style="font-weight:bold; font-family: Arial, sans-serif; font-size:14px; line-height:14px; color:#ffffff; text-decoration:none; padding:12px 22px; display:inline-block;">Visualizza ordine</a>
+                            </td>
+                            <td style="width: 12px;">&nbsp;</td>
+                            <td align="center" bgcolor="#555555" style="border-radius:10px;" bgcolor="#555555">
+                                <a href="{{ store_url }}" target="_blank" style="font-weight:bold; font-family: Arial, sans-serif; font-size:14px; line-height:14px; color:#ffffff; text-decoration:none; padding:12px 22px; display:inline-block;">Visita il Negozio</a>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+                <td style="background-color: #f6f9fb;">
+                    <table width="100%">
+                        <tr>
+                            <td style="text-align: center; font-size: 12px; color: #94a3b8; padding: 20px 0;">
+                                <p style="margin: 0;">Cordiali saluti,<br>Il team di AMOUR Parfums</p>
+                                <p style="margin-top: 10px;">&copy; {{ current_year }} AMOUR Parfums. Tutti i diritti riservati.</p>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </center>
+</body>
+</html>

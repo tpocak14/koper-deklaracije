@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>Prijava - Nadzorna Plošča</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.11.1/font/bootstrap-icons.min.css">
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='favicon.png') }}">
+    
+    <script>
+        // Fallback za Tailwind CSS in Bootstrap Icons
+        document.addEventListener('DOMContentLoaded', function() {
+            // Preveri Tailwind CSS
+            setTimeout(function() {
+                if (typeof tailwind === 'undefined') {
+                    console.warn('Tailwind CSS se ni naložil, poskušam z alternativnim CDN');
+                    const script = document.createElement('script');
+                    script.src = 'https://unpkg.com/tailwindcss@3.4.0/lib/index.min.js';
+                    script.onload = function() {
+                        // Nastavi Tailwind config po uspešnem nalaganju
+                        if (typeof tailwind !== 'undefined') {
+                            tailwind.config = {
+                                theme: {
+                                    extend: {
+                                        colors: {
+                                            primary: {
+                                                50: '#e6f7f8',
+                                                100: '#cceff1',
+                                                200: '#99dfe3',
+                                                300: '#66cfd5',
+                                                400: '#33bfc7',
+                                                500: '#10B0B5',
+                                                600: '#0e9da2',
+                                                700: '#0b8a8f',
+                                                800: '#09777c',
+                                                900: '#066469',
+                                            }
+                                        }
+                                    }
+                                }
+                            };
+                        }
+                    };
+                    document.head.appendChild(script);
+                } else {
+                    // Tailwind je naložen, nastavi config
+                    tailwind.config = {
+                        theme: {
+                            extend: {
+                                colors: {
+                                    primary: {
+                                        50: '#e6f7f8',
+                                        100: '#cceff1',
+                                        200: '#99dfe3',
+                                        300: '#66cfd5',
+                                        400: '#33bfc7',
+                                        500: '#10B0B5',
+                                        600: '#0e9da2',
+                                        700: '#0b8a8f',
+                                        800: '#09777c',
+                                        900: '#066469',
+                                    }
+                                }
+                            }
+                        }
+                    };
+                }
+            }, 500);
+            
+            // Preveri Bootstrap Icons
+            setTimeout(function() {
+                const testIcon = document.createElement('i');
+                testIcon.className = 'bi bi-check';
+                testIcon.style.display = 'none';
+                document.body.appendChild(testIcon);
+                
+                const computedStyle = window.getComputedStyle(testIcon, '::before');
+                const content = computedStyle.getPropertyValue('content');
+                
+                if (!content || content === 'none' || content === 'normal') {
+                    console.warn('Bootstrap Icons se ni naložil, poskušam z alternativnim CDN');
+                    const link = document.createElement('link');
+                    link.rel = 'stylesheet';
+                    link.href = 'https://unpkg.com/bootstrap-icons@1.11.1/font/bootstrap-icons.css';
+                    document.head.appendChild(link);
+                }
+                
+                document.body.removeChild(testIcon);
+            }, 1000);
+        });
+    </script>
+</head>
+<body class="bg-primary-500 min-h-screen flex items-center justify-center p-4">
+    <div class="max-w-md w-full">
+        <!-- Glavni login container -->
+        <div class="bg-white rounded-2xl shadow-2xl p-8 space-y-8 relative">
+            <button id="hard-refresh-btn" type="button" title="Hard refresh" class="absolute top-4 right-4 inline-flex items-center justify-center h-10 w-10 rounded-lg border border-gray-200 text-gray-500 hover:text-primary-600 hover:border-primary-200 hover:bg-primary-50 transition-colors">
+                <i class="bi bi-arrow-repeat text-xl"></i>
+            </button>
+            <!-- Logo in naslov -->
+            <div class="text-center space-y-4">
+                <div class="mx-auto h-16 w-16 rounded-2xl bg-primary-50 flex items-center justify-center shadow-lg">
+                    <img src="{{ url_for('static', filename='favicon.png') }}" alt="Logo" class="h-10 w-auto">
+                </div>
+                <div>
+                    <h1 class="text-2xl font-bold text-gray-900">
+                        Dobrodošli
+                    </h1>
+                    <p class="text-sm text-gray-600 mt-1">
+                        Nadzorna plošča za deklaracije
+                    </p>
+                </div>
+            </div>
+            
+            <!-- Toast container -->
+            <div id="toast-container" class="fixed top-4 right-4 z-50 space-y-2"></div>
+            
+            <!-- Login forma -->
+            <form class="space-y-6" id="login-form">
+                <div class="space-y-4">
+                    <div>
+                        <label for="username" class="block text-sm font-medium text-gray-700 mb-2">
+                            Uporabniško ime
+                        </label>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <i class="bi bi-person text-gray-400"></i>
+                            </div>
+                            <input id="username" name="username" type="text" required 
+                                   class="w-full pl-10 pr-3 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200"
+                                   placeholder="Vnesite uporabniško ime">
+                        </div>
+                    </div>
+                    <div>
+                        <label for="password" class="block text-sm font-medium text-gray-700 mb-2">
+                            Geslo
+                        </label>
+                        <div class="relative">
+                            <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                <i class="bi bi-lock text-gray-400"></i>
+                            </div>
+                            <input id="password" name="password" type="password" required 
+                                   class="w-full pl-10 pr-3 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all duration-200"
+                                   placeholder="Vnesite geslo">
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Prijava gumb -->
+                <button type="submit" 
+                        class="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-lg text-sm font-semibold text-white bg-primary-500 hover:bg-primary-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 transition-all duration-200 transform hover:scale-[1.02]">
+                    <span id="login-text">Prijavi se</span>
+                    <span id="login-spinner" class="hidden">
+                        <svg class="animate-spin -ml-1 mr-3 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Prijavljam...
+                    </span>
+                </button>
+            </form>
+        </div>
+        
+        <!-- Copyright -->
+        <div class="text-center mt-8">
+            <p class="text-sm text-white/80">
+                © Amour Parfums <span id="current-year"></span>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        // Nastavi trenutno leto
+        document.getElementById('current-year').textContent = new Date().getFullYear();
+        
+        function showToast(message, type = 'success') {
+            const toastContainer = document.getElementById('toast-container');
+            if (!toastContainer) return;
+
+            const toastId = 'toast-' + Date.now();
+            
+            const typeClasses = {
+                'success': 'bg-green-500',
+                'error': 'bg-red-500',
+                'warning': 'bg-yellow-500',
+                'info': 'bg-blue-500',
+                'danger': 'bg-red-500'
+            };
+            
+            const iconClasses = {
+                'success': 'bi-check-circle',
+                'error': 'bi-exclamation-triangle',
+                'warning': 'bi-exclamation-triangle',
+                'info': 'bi-info-circle',
+                'danger': 'bi-exclamation-triangle'
+            };
+
+            const toastHTML = `
+                <div class="flex items-center w-full max-w-xs p-4 text-gray-500 bg-white rounded-xl shadow-2xl border border-gray-100" role="alert" id="${toastId}">
+                    <div class="inline-flex items-center justify-center flex-shrink-0 w-8 h-8 ${typeClasses[type] || typeClasses['success']} text-white rounded-lg">
+                        <i class="bi ${iconClasses[type] || iconClasses['success']}"></i>
+                    </div>
+                    <div class="ml-3 text-sm font-normal">${message}</div>
+                    <button type="button" class="ml-auto -mx-1.5 -my-1.5 bg-white text-gray-400 hover:text-gray-900 rounded-lg focus:ring-2 focus:ring-gray-300 p-1.5 hover:bg-gray-100 inline-flex items-center justify-center h-8 w-8" onclick="this.parentElement.remove()">
+                        <i class="bi bi-x"></i>
+                    </button>
+                </div>
+            `;
+
+            toastContainer.insertAdjacentHTML('beforeend', toastHTML);
+            const toastElement = document.getElementById(toastId);
+
+            setTimeout(() => {
+                if (toastElement && toastElement.parentNode) {
+                    toastElement.remove();
+                }
+            }, 5000);
+        }
+
+        async function hardRefresh() {
+            try {
+                if ('serviceWorker' in navigator) {
+                    const regs = await navigator.serviceWorker.getRegistrations();
+                    await Promise.all(regs.map(reg => reg.unregister()));
+                }
+                if ('caches' in window) {
+                    const keys = await caches.keys();
+                    await Promise.all(keys.map(key => caches.delete(key)));
+                }
+            } catch (e) {
+                console.warn('Hard refresh cleanup failed:', e);
+            } finally {
+                const url = new URL(window.location.href);
+                url.searchParams.set('hard', Date.now().toString());
+                window.location.replace(url.toString());
+            }
+        }
+
+        document.getElementById('hard-refresh-btn')?.addEventListener('click', hardRefresh);
+
+        document.getElementById('login-form').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const username = document.getElementById('username').value.trim();
+            const password = document.getElementById('password').value.trim();
+            
+            if (!username || !password) {
+                showToast('Prosimo, izpolnite vsa polja', 'warning');
+                return;
+            }
+            
+            // Prikaži spinner
+            document.getElementById('login-text').classList.add('hidden');
+            document.getElementById('login-spinner').classList.remove('hidden');
+            
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast('Uspešna prijava!', 'success');
+                    // Shrani podatke o uporabniku v localStorage
+                    localStorage.setItem('currentUser', JSON.stringify(result.user));
+                    console.log('Uporabnik shranjen v localStorage:', result.user);
+                    // Preusmeri na glavno stran takoj
+                    console.log('Preusmerjam na glavno stran...');
+                    window.location.replace('/');
+                } else {
+                    showToast(result.error || 'Napaka pri prijavi', 'error');
+                }
+            } catch (error) {
+                console.error('Napaka pri prijavi:', error);
+                showToast('Napaka pri prijavi', 'error');
+            } finally {
+                // Skrij spinner
+                document.getElementById('login-text').classList.remove('hidden');
+                document.getElementById('login-spinner').classList.add('hidden');
+            }
+        });
+    </script>
+</body>
+</html>

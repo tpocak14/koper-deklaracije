@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Gesla - NIKOLI na GitHub
+.env
+.env.txt
+.env.local
+.env.*
+
+# Zacasne in build mape
+.cache/
+_tmp/
+out/
+node_modules/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Izvozi in podatki
+*.csv
+*.zip
+
+# Arhiv stare zgodovine
+.git-staro-arhiv/
+
+# Crash report od filter-repo
+.git/fast_import_crash_*

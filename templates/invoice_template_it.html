@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+    <title>Fattura per il tuo ordine | AMOUR Parfums</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #f4f4f4; font-family: Arial, sans-serif; }
+        table { border-spacing: 0; }
+        td { padding: 0; }
+        img { border: 0; display:block; }
+    </style>
+</head>
+<body>
+    <center style="width: 100%; table-layout: fixed; background-color: #f6f9fb; padding: 0;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-spacing:0;">
+            <tr>
+                <td align="center" style="padding: 24px 16px 60px;">
+                    <table width="600" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#ffffff;width:100%;max-width:600px;border-spacing:0;color:#333333;border-radius:16px;box-shadow:0 2px 12px rgba(0,0,0,0.06);overflow:hidden;">
+            <tr>
+                <td style="padding: 20px; text-align: center; background-color: #ffffff;">
+                    <table align="center" border="0" cellpadding="0" cellspacing="0" width="180" bgcolor="#ffffff" style="background-color:#ffffff; border-radius:12px;">
+                        <tr>
+                            <td align="center" style="padding:12px;">
+                                <a href="{{ store_url }}" target="_blank" style="text-decoration:none;">
+                                    <img src="cid:logo" alt="AMOUR Parfums Logo" width="150" style="display:block; width:150px; max-width:150px; height:auto; background-color:#ffffff;">
+                                </a>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 32px 40px; text-align: left; line-height: 1.6;">
+                    <h2 style="font-size: 22px; margin: 0 0 8px 0;">Fattura per il tuo ordine</h2>
+                    <p style="margin:0;">Gentile cliente,</p>
+                    <p style="margin:0 0 8px 0;">in allegato trovi la fattura ufficiale per <strong>ordine {{ order_number }}</strong>.</p>
+                </td>
+            </tr>
+            <tr>
+                <td style="padding: 20px 40px 40px; text-align: center;">
+                    <table role="presentation" cellspacing="0" cellpadding="0" border="0" align="center">
+                        <tr>
+                            <td align="center" bgcolor="#ff746b" style="border-radius:10px;">
+                                <a href="{{ status_url }}" target="_blank" style="font-weight:bold; font-family: Arial, sans-serif; font-size:14px; line-height:14px; color:#ffffff; text-decoration:none; padding:12px 22px; display:inline-block;">Vedi ordine</a>
+                            </td>
+                            <td style="width: 12px;">&nbsp;</td>
+                            <td align="center" bgcolor="#555555" style="border-radius:10px;">
+                                <a href="{{ store_url }}" target="_blank" style="font-weight:bold; font-family: Arial, sans-serif; font-size:14px; line-height:14px; color:#ffffff; text-decoration:none; padding:12px 22px; display:inline-block;">Visita il negozio</a>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+            <tr>
+                <td style="background-color: #f6f9fb;">
+                    <table width="100%">
+                        <tr>
+                            <td style="text-align: center; font-size: 12px; color: #94a3b8; padding: 20px 0;">
+                                <p style="margin: 0;">Cordiali saluti,<br>Team AMOUR Parfums</p>
+                                <p style="margin-top: 10px;">&copy; {{ current_year }} AMOUR Parfums. Tutti i diritti riservati.</p>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </center>
+</body>
+</html>

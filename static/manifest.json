@@ -1,0 +1,21 @@
+{
+    "name": "Nadzorna Plošča za Deklaracije",
+    "short_name": "Deklaracije",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#f7fafc",
+    "theme_color": "#4a5568",
+    "description": "Aplikacija za upravljanje z deklaracijami za parfume.",
+    "icons": [
+      {
+        "src": "/static/logo.png",
+        "sizes": "192x192",
+        "type": "image/png"
+      },
+      {
+        "src": "/static/logo.png",
+        "sizes": "512x512",
+        "type": "image/png"
+      }
+    ]
+  }

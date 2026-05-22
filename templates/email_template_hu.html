@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <meta name="supported-color-schemes" content="light">
+    <title>Biztonsági nyilatkozat a rendeléséhez | AMOUR Parfums</title>
+    <style>
+        body { margin: 0; padding: 0; background-color: #f6f9fb; font-family: Arial, sans-serif; color: #0f172a; }
+        table { border-spacing: 0; }
+        td { padding: 0; }
+        img { border: 0; display: block; }
+        .card { background:#ffffff; margin:0 auto; width:100%; max-width:600px; border-spacing:0; color:#333333; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.06); overflow: hidden; }
+        .container { padding: 32px 40px; text-align:left; line-height:1.6; }
+        .section-title { font-size: 18px; margin: 30px 0 10px 0; padding-bottom: 10px; border-bottom:2px solid #eeeeee; }
+        .btn { display:inline-block; padding:12px 24px; text-decoration:none; border-radius:10px; font-weight:bold; color:#ffffff !important; }
+    </style>
+</head>
+<body>
+    <center style="width: 100%; table-layout: fixed; background-color: #f6f9fb; padding: 24px 0 60px;">
+        <table class="card">
+            <!-- Header with Logo -->
+            <tr>
+                <td style="padding: 20px; text-align: center; background-color: #ffffff;">
+                    <table align="center" border="0" cellpadding="0" cellspacing="0" width="180" bgcolor="#ffffff" style="background-color:#ffffff; border-radius:12px;">
+                        <tr>
+                            <td align="center" style="padding:12px;">
+                                <a href="{{ store_url }}" target="_blank" style="text-decoration:none;">
+                                    <img src="cid:logo" alt="AMOUR Parfums Logo" width="150" style="display:block; width:150px; max-width:150px; height:auto; background-color:#ffffff;">
+                                </a>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+                <td class="container">
+                    <h2 style="font-size: 22px; margin: 0 0 8px 0;">Biztonsági nyilatkozat a rendeléséhez</h2>
+                    <p style="margin: 0 0 10px 0;">Tisztelt Vásárló!</p>
+                    <p style="margin: 0;">Köszönjük a vásárlást. Csatolmányban küldjük Önnek a <strong>{{ order_number }} számú rendelés</strong> termékeinek biztonsági adatlapját.</p>
+                    
+                    <h3 style="font-size: 18px; margin-top: 30px; border-bottom: 2px solid #eeeeee; padding-bottom: 10px;">Rendelés összegzése</h3>
+                    <table style="width: 100%; margin-top: 12px; border-collapse: collapse;">
+                        {% for item in items %}
+                        <tr>
+                            <td style="padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; vertical-align: middle;">
+                                <img src="{{ item.image_url }}" alt="{{ item.title }}" width="60" height="60" style="width: 60px; height: 60px; object-fit: cover; border-radius: 8px; margin-right: 15px;">
+                            </td>
+                            <td style="padding: 12px; text-align: left; border-bottom: 1px solid #e5e7eb; vertical-align: middle;">
+                                <div style="font-weight: 600; color: #0f172a;">{{ item.title }}</div>
+                                <div style="font-size: 12px; color: #64748b; margin-top: 2px;">Mennyiség: {{ item.quantity }}</div>
+                            </td>
+                            <td style="padding: 12px; text-align: right; border-bottom: 1px solid #e5e7eb; white-space: nowrap; vertical-align: middle;">{{ "%.2f"|format(item.price|float) }} €</td>
+                        </tr>
+                        {% endfor %}
+                    </table>
+
+                    <!-- Megjegyzés a manuális adatbevitelről -->
+                    <p style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eeeeee; font-size: 12px; font-style: italic; color: #666666; line-height: 1.5;">
+                        <strong>Megjegyzés:</strong> A nyilatkozat és a lejárati dátum automatikusan generálódott a manuálisan vezetett belső nyilvántartások alapján. A gondos ellenőrzés ellenére ritkán előfordulhatnak eltérések. Ha esetleges hibát észlel, kérjük, jelezze felénk – szívesen ellenőrizzük és szükség esetén helyesen javítjuk az adatokat.
+                    </p>
+                </td>
+            </tr>
+
+            <!-- CTA Buttons -->
+            <tr>
+                <td style="padding: 20px 40px 40px; text-align: center;">
+                    <table align="center" border="0" cellspacing="0" cellpadding="0">
+                        <tr>
+                            <td>
+                                <a href="{{ status_url }}" target="_blank" class="btn" style="background-color: #ff746b;">Rendelés megtekintése</a>
+                            </td>
+                            <td style="width: 20px;"></td>
+                            <td>
+                                <a href="{{ store_url }}" target="_blank" class="btn" style="background-color: #555555;">Bolt látogatása</a>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+                <td style="background-color: #f6f9fb;">
+                    <table width="100%">
+                        <tr>
+                            <td style="text-align: center; font-size: 12px; color: #94a3b8; padding: 20px 0;">
+                                <p style="margin: 0;">Üdvözlettel,<br>Az AMOUR Parfums csapata</p>
+                                <p style="margin-top: 10px;">&copy; {{ current_year }} AMOUR Parfums. Minden jog fenntartva.</p>
+                            </td>
+                        </tr>
+                    </table>
+                </td>
+            </tr>
+        </table>
+    </center>
+</body>
+</html> 
