@@ -453,6 +453,106 @@ def procurement2_add_onhand():
         current_app.logger.error(f"procurement2_add_onhand error: {e}\n{traceback.format_exc()}")
         return make_err('SERVER_ERROR', 'Napaka pri dodajanju v predal', status=500)
 
+@api_bp.route('/procurement2/products/quick-add', methods=['POST'])
+def procurement2_quick_add_product():
+    """Quickly create a procurement-only SKU under a supplier with minimal fields."""
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+    supplier = (data.get('supplier') or '').strip().upper()
+    sku = str((data.get('sku') or '')).strip()
+    name = str((data.get('name') or '')).strip()
+    try:
+        price = float(data.get('price') or 0)
+    except (TypeError, ValueError):
+        price = 0.0
+    unit = str((data.get('unit') or 'kos')).strip() or 'kos'
+    if not supplier or not sku or not name:
+        return make_err('BAD_REQUEST', 'supplier, sku in name so obvezni', status=400)
+    if supplier in ('FLORGARDEN', 'MISTRAL'):
+        return make_err('BAD_REQUEST', 'Parfumski dobavitelji uporabljajo katalog parfumov, ne procurement-only', status=400)
+    try:
+        _ensure_procurement_only_tables()
+        db = get_db(); c = db.cursor()
+        c.execute(
+            """
+            INSERT INTO proc_suppliers (name) VALUES (%s)
+            ON CONFLICT (name) DO NOTHING
+            """,
+            (supplier,)
+        )
+        c.execute("SELECT id FROM proc_suppliers WHERE name = %s", (supplier,))
+        row = c.fetchone()
+        if not row:
+            return make_err('SERVER_ERROR', 'Dobavitelja ni mogoče ustvariti', status=500)
+        supplier_id = row[0] if isinstance(row, tuple) else row['id']
+        c.execute(
+            """
+            INSERT INTO proc_products (supplier_id, sku, name, unit, price, min_on_hand, on_hand, pending, committed)
+            VALUES (%s, %s, %s, %s, %s, 0, 0, 0, 0)
+            ON CONFLICT (supplier_id, sku) DO UPDATE SET
+                name = EXCLUDED.name,
+                price = EXCLUDED.price,
+                updated_at = NOW()
+            RETURNING id
+            """,
+            (supplier_id, sku, name, unit, price)
+        )
+        new = c.fetchone()
+        db.commit(); c.close()
+        return make_ok({'id': (new[0] if isinstance(new, tuple) else new.get('id')), 'supplier': supplier, 'sku': sku, 'name': name})
+    except Exception as e:
+        try:
+            get_db().rollback()
+        except Exception:
+            pass
+        current_app.logger.error(f"procurement2_quick_add_product error: {e}")
+        return make_err('SERVER_ERROR', 'Napaka pri dodajanju artikla', status=500)
+
+
+@api_bp.route('/procurement2/stock/min', methods=['POST'])
+def procurement2_set_min_on_hand():
+    """Update min_on_hand threshold for a procurement-only SKU."""
+    try:
+        data = request.get_json(force=True) or {}
+    except Exception:
+        data = {}
+    supplier = (data.get('supplier') or '').strip().upper()
+    sku = str((data.get('sku') or '')).strip()
+    try:
+        min_val = max(0, int(data.get('min_on_hand') or 0))
+    except (TypeError, ValueError):
+        min_val = 0
+    if not supplier or not sku:
+        return make_err('BAD_REQUEST', 'Manjkajo podatki', status=400)
+    try:
+        _ensure_procurement_only_tables()
+        db = get_db(); c = db.cursor()
+        c.execute("SELECT id FROM proc_suppliers WHERE name = %s", (supplier,))
+        row = c.fetchone()
+        if not row:
+            return make_err('NOT_FOUND', 'Dobavitelj ne obstaja', status=404)
+        supplier_id = row[0] if isinstance(row, tuple) else row['id']
+        c.execute(
+            """
+            UPDATE proc_products
+            SET min_on_hand = %s, updated_at = NOW()
+            WHERE supplier_id = %s AND sku = %s
+            """,
+            (min_val, supplier_id, sku)
+        )
+        db.commit(); c.close()
+        return make_ok({'updated': True, 'min_on_hand': min_val})
+    except Exception as e:
+        try:
+            get_db().rollback()
+        except Exception:
+            pass
+        current_app.logger.error(f"procurement2_set_min_on_hand error: {e}")
+        return make_err('SERVER_ERROR', 'Napaka pri shranjevanju', status=500)
+
+
 @api_bp.route('/procurement2/cart/bulk-set', methods=['POST'])
 def procurement2_cart_bulk_set():
     try:
@@ -684,6 +784,194 @@ def procurement_bulk_min_on_hand():
         return make_err('SERVER_ERROR', 'Napaka pri shranjevanju', status=500)
     finally:
         c.close()
+
+# --- Stock movements (audit log) -------------------------------------------------
+# For perfume suppliers (FLORGARDEN, MISTRAL) "last sale" = last `serije` row
+# (pouring event). For procurement-only suppliers it is the last
+# `proc_stock_movements` row with negative delta.
+
+@api_bp.route('/procurement/stock-movements/last', methods=['GET'])
+def procurement_last_movements_perfumes():
+    """Map of product_no -> {last_at, source} for a perfume supplier."""
+    supplier = (request.args.get('supplier') or '').upper()
+    if supplier not in ('FLORGARDEN', 'MISTRAL'):
+        return make_err('BAD_REQUEST', 'supplier mora biti FLORGARDEN ali MISTRAL', status=400)
+    db = get_db(); c = db.cursor()
+    try:
+        c.execute(
+            """
+            SELECT p.product_no AS key,
+                   MAX(COALESCE(s.created_at, s.created_at_original)) AS last_at
+            FROM serije s
+            JOIN parfumi p ON p.id = s.parfum_id
+            JOIN proizvajalci pr ON pr.id = p.proizvajalec_id
+            WHERE pr.ime = %s
+            GROUP BY p.product_no
+            """,
+            (supplier,)
+        )
+        rows = c.fetchall() or []
+        out = {}
+        for r in rows:
+            key = r['key'] if isinstance(r, dict) else r[0]
+            last_at = r['last_at'] if isinstance(r, dict) else r[1]
+            if key and last_at:
+                out[str(key)] = {'last_at': last_at.isoformat() if hasattr(last_at, 'isoformat') else str(last_at), 'source': 'serija'}
+        return make_ok(out)
+    except Exception as e:
+        current_app.logger.error(f"procurement_last_movements_perfumes error: {e}")
+        return make_ok({})
+    finally:
+        c.close()
+
+
+@api_bp.route('/procurement2/stock-movements/last', methods=['GET'])
+def procurement_last_movements_proc():
+    """Map of sku -> {last_at, source} for a procurement-only supplier.
+
+    Considers only DECREMENT events (delta < 0) -- those are "sales". Inserts
+    via order receive (positive delta) are not counted as sales.
+    """
+    supplier = (request.args.get('supplier') or '').upper()
+    if not supplier:
+        return make_err('BAD_REQUEST', 'supplier je obvezen', status=400)
+    db = get_db(); c = db.cursor()
+    try:
+        # Ensure tables exist (idempotent in case migration race)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS proc_stock_movements (
+                id BIGSERIAL PRIMARY KEY,
+                supplier_id INTEGER NOT NULL,
+                sku TEXT NOT NULL,
+                delta INTEGER NOT NULL,
+                on_hand_before INTEGER NOT NULL,
+                on_hand_after INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                source_ref TEXT NULL,
+                note TEXT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+        c.execute(
+            """
+            SELECT m.sku AS key,
+                   MAX(m.created_at) AS last_at,
+                   (SELECT source FROM proc_stock_movements m2
+                      WHERE m2.supplier_id = ps.id AND m2.sku = m.sku AND m2.delta < 0
+                      ORDER BY m2.created_at DESC LIMIT 1) AS source
+            FROM proc_stock_movements m
+            JOIN proc_suppliers ps ON ps.id = m.supplier_id
+            WHERE ps.name = %s AND m.delta < 0
+            GROUP BY m.sku, ps.id
+            """,
+            (supplier,)
+        )
+        rows = c.fetchall() or []
+        out = {}
+        for r in rows:
+            key = r['key'] if isinstance(r, dict) else r[0]
+            last_at = r['last_at'] if isinstance(r, dict) else r[1]
+            source = r['source'] if isinstance(r, dict) else r[2]
+            if key and last_at:
+                out[str(key)] = {
+                    'last_at': last_at.isoformat() if hasattr(last_at, 'isoformat') else str(last_at),
+                    'source': source or 'unknown',
+                }
+        return make_ok(out)
+    except Exception as e:
+        current_app.logger.error(f"procurement_last_movements_proc error: {e}")
+        return make_ok({})
+    finally:
+        c.close()
+
+
+@api_bp.route('/procurement/stock-movements', methods=['GET'])
+def procurement_movements_perfume_history():
+    """History of last N serije rows for a perfume."""
+    supplier = (request.args.get('supplier') or '').upper()
+    product_no = (request.args.get('product_no') or '').strip()
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    if supplier not in ('FLORGARDEN', 'MISTRAL') or not product_no:
+        return make_err('BAD_REQUEST', 'supplier in product_no sta obvezna', status=400)
+    db = get_db(); c = db.cursor()
+    try:
+        c.execute(
+            """
+            SELECT s.id,
+                   COALESCE(s.created_at, s.created_at_original) AS at,
+                   s.serijska_stevilka,
+                   s.vnesel_uporabnik,
+                   s.rok_uporabe,
+                   s.stanje
+            FROM serije s
+            JOIN parfumi p ON p.id = s.parfum_id
+            JOIN proizvajalci pr ON pr.id = p.proizvajalec_id
+            WHERE pr.ime = %s AND p.product_no = %s
+            ORDER BY at DESC NULLS LAST
+            LIMIT %s
+            """,
+            (supplier, product_no, limit)
+        )
+        rows = c.fetchall() or []
+        out = []
+        for r in rows:
+            d = dict(r) if not isinstance(r, dict) else r
+            if d.get('at') and hasattr(d['at'], 'isoformat'):
+                d['at'] = d['at'].isoformat()
+            if d.get('rok_uporabe') and hasattr(d['rok_uporabe'], 'isoformat'):
+                d['rok_uporabe'] = d['rok_uporabe'].isoformat()
+            d['source'] = 'serija'
+            out.append(d)
+        return make_ok(out)
+    except Exception as e:
+        current_app.logger.error(f"procurement_movements_perfume_history error: {e}")
+        return make_ok([])
+    finally:
+        c.close()
+
+
+@api_bp.route('/procurement2/stock-movements', methods=['GET'])
+def procurement_movements_proc_history():
+    """History of last N proc_stock_movements rows for a SKU."""
+    supplier = (request.args.get('supplier') or '').upper()
+    sku = (request.args.get('sku') or '').strip()
+    try:
+        limit = max(1, min(int(request.args.get('limit') or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    if not supplier or not sku:
+        return make_err('BAD_REQUEST', 'supplier in sku sta obvezna', status=400)
+    db = get_db(); c = db.cursor()
+    try:
+        c.execute(
+            """
+            SELECT m.id, m.created_at AS at, m.delta, m.on_hand_before, m.on_hand_after,
+                   m.source, m.source_ref, m.note
+            FROM proc_stock_movements m
+            JOIN proc_suppliers ps ON ps.id = m.supplier_id
+            WHERE ps.name = %s AND m.sku = %s
+            ORDER BY m.created_at DESC
+            LIMIT %s
+            """,
+            (supplier, sku, limit)
+        )
+        rows = c.fetchall() or []
+        out = []
+        for r in rows:
+            d = dict(r) if not isinstance(r, dict) else r
+            if d.get('at') and hasattr(d['at'], 'isoformat'):
+                d['at'] = d['at'].isoformat()
+            out.append(d)
+        return make_ok(out)
+    except Exception as e:
+        current_app.logger.error(f"procurement_movements_proc_history error: {e}")
+        return make_ok([])
+    finally:
+        c.close()
+
 
 @api_bp.route('/procurement/cart/remove', methods=['POST'])
 def procurement_cart_remove():

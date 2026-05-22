@@ -8283,22 +8283,107 @@ let narocilaAbortController = null;
                     const nameCell = isProc ? (r.name || '') : (r.ime_parfuma || '');
                     const pendingVal = isProc ? (r.pending||0) : (r.on_order_pending||0);
                     const committedVal = isProc ? (r.committed||0) : (r.on_order_committed||0);
+                    const minVal = (typeof r.min_on_hand === 'number') ? r.min_on_hand : 0;
                     const trAttrs = isProc ? `data-sku="${r.sku}" data-proc-id="${r.id||''}"` : `data-product-no="${r.product_no}" data-proizvajalec-id="${r.proizvajalec_id}"`;
+                    const keyAttr = isProc ? (r.sku || '') : (r.product_no || '');
+                    const delBtn = (isProc && hasUserPermission && hasUserPermission('delete_users'))
+                        ? '<button class="px-2 py-1 border rounded text-xs text-red-600 proc-del-item" title="Izbriši">Izbriši</button>'
+                        : '';
                     return `
-                    <tr ${trAttrs}>
-                        <td class="px-4 py-2 font-mono">${idCell}</td>
-                        <td class="px-4 py-2 ${stateClass}">${nameCell}</td>
-                        <td class="px-4 py-2 ${stateClass}">${r.on_hand||0}</td>
-                        <td class="px-4 py-2"><input type="number" class="w-24 px-2 py-1 border rounded pending-input" value="${pendingVal}" /></td>
-                        <td class="px-4 py-2">${committedVal}</td>
-                        <td class="px-4 py-2">
-                            <div class="flex items-center gap-2">
-                                <button class="px-3 py-1 border rounded text-xs save-pending">Shrani</button>
-                                ${isProc && hasUserPermission && hasUserPermission('delete_users') ? '<button class="px-3 py-1 border rounded text-xs text-red-600 proc-del-item">Izbriši</button>' : ''}
+                    <tr ${trAttrs} data-key="${keyAttr}">
+                        <td class="px-4 py-2 font-mono" data-label="Product No">${idCell}</td>
+                        <td class="px-4 py-2 ${stateClass}" data-label="Parfum">${nameCell}</td>
+                        <td class="px-4 py-2 ${stateClass}" data-label="Na zalogi">${r.on_hand||0}</td>
+                        <td class="px-4 py-2" data-label="Min"><input type="number" min="0" class="w-16 px-2 py-1 border rounded min-input" value="${minVal}" /></td>
+                        <td class="px-4 py-2" data-label="Naročilo"><input type="number" min="0" class="w-24 px-2 py-1 border rounded pending-input" value="${pendingVal}" /></td>
+                        <td class="px-4 py-2" data-label="Oddano">${committedVal}</td>
+                        <td class="px-4 py-2 proc-last-sale" data-label="Zadnja prodaja"><span class="text-xs text-gray-400">…</span></td>
+                        <td class="px-4 py-2 hidden sm:table-cell" data-label="Akcije">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <button class="px-2 py-1 border rounded text-xs save-pending" title="Shrani spremembe za to vrstico">Shrani</button>
+                                <button class="px-2 py-1 border rounded text-xs proc-history" title="Zgodovina gibanj">Zgodovina</button>
+                                ${delBtn}
                             </div>
                         </td>
                     </tr>`
                 }).join('');
+                // Asynchronously load last-sale per row and update "Zadnja prodaja" cells.
+                (async () => {
+                    try {
+                        const isProc = isProcOnlySupplier(supplier);
+                        const url = isProc
+                            ? `/api/procurement2/stock-movements/last?supplier=${encodeURIComponent(supplier)}`
+                            : `/api/procurement/stock-movements/last?supplier=${encodeURIComponent(supplier)}`;
+                        const resp = await fetch(url);
+                        const json = await resp.json().catch(() => ({}));
+                        const map = (json && json.success && json.data) ? json.data : {};
+                        const fmt = (iso) => {
+                            try {
+                                const d = new Date(iso);
+                                const today = new Date();
+                                const diffMs = today - d;
+                                const days = Math.floor(diffMs / 86400000);
+                                if (days <= 0) return 'danes';
+                                if (days === 1) return 'včeraj';
+                                if (days < 7) return `pred ${days} dnevi`;
+                                return d.toLocaleDateString('sl-SI');
+                            } catch (_) { return ''; }
+                        };
+                        const sourceIcon = (s) => {
+                            if (s === 'serija') return '<i class="bi bi-droplet-half text-cyan-600" title="Iztok (serija)"></i>';
+                            if (s && s.startsWith('shopify')) return '<i class="bi bi-shop text-emerald-600" title="Shopify"></i>';
+                            if (s && s.startsWith('mk')) return '<i class="bi bi-cash-coin text-amber-600" title="MetaKocka"></i>';
+                            return '<i class="bi bi-circle text-gray-400"></i>';
+                        };
+                        stockBody.querySelectorAll('tr').forEach(tr => {
+                            const key = tr.getAttribute('data-key') || '';
+                            const cell = tr.querySelector('.proc-last-sale');
+                            if (!cell) return;
+                            const info = map[key];
+                            if (!info) {
+                                cell.innerHTML = '<span class="text-xs text-gray-400">—</span>';
+                                return;
+                            }
+                            cell.innerHTML = `<span class="text-xs text-gray-700">${sourceIcon(info.source)} ${fmt(info.last_at)}</span>`;
+                        });
+                    } catch (_) {
+                        stockBody.querySelectorAll('.proc-last-sale').forEach(c => { c.innerHTML = '<span class="text-xs text-gray-400">—</span>'; });
+                    }
+                })();
+                // Wire up history popovers.
+                stockBody.querySelectorAll('.proc-history').forEach(btn => {
+                    btn.addEventListener('click', (ev) => {
+                        ev.stopPropagation();
+                        const tr = ev.target.closest('tr');
+                        if (tr) window.__openProcHistory(tr, supplier);
+                    });
+                });
+                // Auto-save min_on_hand on blur.
+                stockBody.querySelectorAll('.min-input').forEach(input => {
+                    input.addEventListener('blur', async () => {
+                        const tr = input.closest('tr');
+                        if (!tr) return;
+                        const supplierCur = supplierSelect.value;
+                        const isProc = isProcOnlySupplier(supplierCur);
+                        const val = Math.max(0, parseInt(input.value || '0', 10));
+                        try {
+                            if (isProc) {
+                                const sku = tr.getAttribute('data-sku');
+                                await fetch('/api/procurement2/stock/min', {
+                                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ supplier: supplierCur, sku, min_on_hand: val })
+                                });
+                            } else {
+                                const product_no = tr.getAttribute('data-product-no');
+                                const proizvajalec_id = parseInt(tr.getAttribute('data-proizvajalec-id') || '0', 10);
+                                await fetch('/api/procurement/stock/bulk-min', {
+                                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ supplier: supplierCur, updates: [{ product_no, proizvajalec_id, min_on_hand: val }] })
+                                });
+                            }
+                        } catch (_) {}
+                    });
+                });
                 // track pending changes for bulk save bar
                 const bar = document.getElementById('proc-bulk-pending-bar');
                 const cnt = document.getElementById('proc-bulk-count');
@@ -8893,7 +8978,56 @@ let narocilaAbortController = null;
         stockSearch && stockSearch.addEventListener('input', () => {
             // debounce
             clearTimeout(window.__procStockTimer);
-            window.__procStockTimer = setTimeout(fetchStock, 200);
+            window.__procStockTimer = setTimeout(async () => {
+                await fetchStock();
+                // Consolidated search: if the table is empty after a search
+                // AND the supplier is procurement-only (not perfume), offer to
+                // add the SKU as a new product right from the search box.
+                try {
+                    const sup = (supplierSelect.value || '').toUpperCase();
+                    const q = (stockSearch.value || '').trim();
+                    if (!sup || !q || !isProcOnlySupplier(sup)) return;
+                    if (stockBody.children.length > 0) return;
+                    stockBody.innerHTML = `
+                        <tr class="proc-add-suggestion">
+                            <td colspan="8" class="px-4 py-4 text-center">
+                                <button id="proc-quick-add" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-white" style="background-color:#00AEB3;">
+                                    <i class="bi bi-plus-lg"></i> Dodaj nov artikel "<span class="font-mono">${q.replace(/[<>&"]/g, '')}</span>" k dobavitelju ${sup}
+                                </button>
+                                <div class="text-xs text-gray-500 mt-2">Odpre pogovorno okno s polji za ime, ceno in zalogo.</div>
+                            </td>
+                        </tr>`;
+                    const qbtn = document.getElementById('proc-quick-add');
+                    if (qbtn) qbtn.addEventListener('click', async () => {
+                        const name = prompt(`Ime artikla za SKU "${q}"?`, q);
+                        if (!name) return;
+                        const priceStr = prompt('Cena (EUR)?', '0');
+                        const price = parseFloat((priceStr || '0').replace(',', '.')) || 0;
+                        try {
+                            // Reuse the Excel import endpoint with a single row.
+                            const fd = new FormData();
+                            const csv = `supplier,sku,name,unit,price,min_on_hand,on_hand\n${sup},${q},${name.replace(/,/g, ' ')},kos,${price},0,0\n`;
+                            // Build a minimal xlsx-equivalent via blob+filename; backend accepts xlsx only.
+                            // Instead, use /api/procurement2/stock/add-onhand pre-create path:
+                            //   first create row via vendors/import is complex — fallback to a tiny dedicated endpoint
+                            const resp = await fetch('/api/procurement2/products/quick-add', {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ supplier: sup, sku: q, name, price })
+                            });
+                            const json = await resp.json().catch(() => ({ success: false }));
+                            if (!resp.ok || !json.success) {
+                                window.showToast && window.showToast(json.error || 'Dodajanje ni uspelo', 'danger');
+                                return;
+                            }
+                            window.showToast && window.showToast(`Dodan artikel ${q}`, 'success');
+                            stockSearch.value = '';
+                            await fetchStock();
+                        } catch (e) {
+                            window.showToast && window.showToast('Napaka pri dodajanju artikla', 'danger');
+                        }
+                    });
+                } catch (_) {}
+            }, 200);
         });
         hideZero && hideZero.addEventListener('change', fetchStock);
         const moreFilters = document.getElementById('proc-more-filters');
@@ -9393,6 +9527,87 @@ let narocilaAbortController = null;
             fetchStock();
         }
 
+        // Stock movements history modal (last 20 entries for one row).
+        window.__openProcHistory = async function(tr, supplierVal) {
+            const modal = document.getElementById('proc-history-modal');
+            const body = document.getElementById('proc-history-body');
+            const subtitle = document.getElementById('proc-history-subtitle');
+            if (!modal || !body) return;
+            const isProc = isProcOnlySupplier(supplierVal);
+            const key = tr.getAttribute(isProc ? 'data-sku' : 'data-product-no') || '';
+            const nameCell = tr.querySelector('td:nth-child(2)');
+            const name = nameCell ? nameCell.textContent.trim() : key;
+            if (subtitle) subtitle.textContent = `${name} • ${supplierVal} • ${key}`;
+            body.innerHTML = '<div class="text-gray-500 text-sm">Nalagam…</div>';
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            try {
+                const url = isProc
+                    ? `/api/procurement2/stock-movements?supplier=${encodeURIComponent(supplierVal)}&sku=${encodeURIComponent(key)}&limit=30`
+                    : `/api/procurement/stock-movements?supplier=${encodeURIComponent(supplierVal)}&product_no=${encodeURIComponent(key)}&limit=30`;
+                const resp = await fetch(url);
+                const json = await resp.json().catch(() => ({}));
+                const rows = (json && json.success && Array.isArray(json.data)) ? json.data : [];
+                if (rows.length === 0) {
+                    body.innerHTML = '<div class="text-gray-500 text-sm">Ni zapisov o gibanjih zaloge.</div>';
+                    return;
+                }
+                const fmt = (iso) => { try { return new Date(iso).toLocaleString('sl-SI'); } catch (_) { return ''; } };
+                const sourceLabel = (s) => {
+                    if (s === 'serija') return 'Iztok (serija)';
+                    if (s === 'shopify_orders/paid') return 'Shopify prodaja';
+                    if (s === 'shopify_orders/cancelled') return 'Shopify preklic';
+                    if (s === 'shopify_refund') return 'Shopify vračilo';
+                    if (s === 'mk_bill') return 'MetaKocka račun';
+                    if (s === 'mk_stock_webhook') return 'MetaKocka stock';
+                    return s || '—';
+                };
+                body.innerHTML = rows.map(r => {
+                    const at = fmt(r.at);
+                    if (isProc) {
+                        const delta = r.delta || 0;
+                        const sign = delta > 0 ? '+' : '';
+                        const color = delta < 0 ? 'text-red-600' : (delta > 0 ? 'text-green-700' : 'text-gray-700');
+                        return `<div class="flex items-center justify-between border-b border-gray-100 py-2">
+                            <div>
+                                <div class="font-medium">${sourceLabel(r.source)}</div>
+                                <div class="text-xs text-gray-500">${at}${r.source_ref ? ' • ' + r.source_ref : ''}${r.note ? ' • ' + r.note : ''}</div>
+                            </div>
+                            <div class="text-right">
+                                <div class="font-mono ${color}">${sign}${delta}</div>
+                                <div class="text-xs text-gray-500">${r.on_hand_before} → ${r.on_hand_after}</div>
+                            </div>
+                        </div>`;
+                    } else {
+                        return `<div class="flex items-center justify-between border-b border-gray-100 py-2">
+                            <div>
+                                <div class="font-medium">${sourceLabel(r.source)} ${r.serijska_stevilka ? `• ${r.serijska_stevilka}` : ''}</div>
+                                <div class="text-xs text-gray-500">${at}${r.vnesel_uporabnik ? ' • ' + r.vnesel_uporabnik : ''}</div>
+                            </div>
+                            <div class="text-right text-xs text-gray-600">${r.stanje || ''}${r.rok_uporabe ? ' • do ' + r.rok_uporabe : ''}</div>
+                        </div>`;
+                    }
+                }).join('');
+            } catch (_) {
+                body.innerHTML = '<div class="text-red-600 text-sm">Napaka pri nalaganju zgodovine.</div>';
+            }
+        };
+        // Close button + backdrop click for history modal.
+        const histModalEl = document.getElementById('proc-history-modal');
+        const histCloseBtn = document.getElementById('proc-history-close');
+        if (histCloseBtn && !histCloseBtn.dataset.bound) {
+            histCloseBtn.dataset.bound = '1';
+            histCloseBtn.addEventListener('click', () => {
+                if (histModalEl) { histModalEl.classList.add('hidden'); histModalEl.classList.remove('flex'); }
+            });
+        }
+        if (histModalEl && !histModalEl.dataset.bound) {
+            histModalEl.dataset.bound = '1';
+            histModalEl.addEventListener('click', (ev) => {
+                if (ev.target === histModalEl) { histModalEl.classList.add('hidden'); histModalEl.classList.remove('flex'); }
+            });
+        }
+
         // Global keyboard shortcuts inside the procurement panel:
         //   "/"   focus stock search (when not typing in another field)
         //   "Esc" close any open proc modal
@@ -9409,7 +9624,7 @@ let narocilaAbortController = null;
                     if (el && !el.disabled) { ev.preventDefault(); el.focus(); el.select && el.select(); }
                 } else if (ev.key === 'Escape') {
                     // Close any open procurement-related modal.
-                    ['proc-onhand-modal', 'po-receive-modal', 'po-images-modal', 'manual-receive-modal'].forEach(id => {
+                    ['proc-history-modal', 'proc-onhand-modal', 'po-receive-modal', 'po-images-modal', 'manual-receive-modal'].forEach(id => {
                         const m = document.getElementById(id);
                         if (m && !m.classList.contains('hidden')) {
                             m.classList.add('hidden');

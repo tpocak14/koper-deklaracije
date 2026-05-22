@@ -142,6 +142,43 @@
         .instructions-content a { color: #0ea5e9; text-decoration: underline; }
         .instructions-content img { max-width: 100%; height: auto; border-radius: 0.5rem; }
 
+        /* Procurement stock table -> card layout on mobile */
+        @media (max-width: 640px) {
+            .proc-stock-table thead { display: none; }
+            .proc-stock-table tbody tr {
+                display: block;
+                border: 1px solid #e5e7eb;
+                border-radius: 0.75rem;
+                margin-bottom: 0.75rem;
+                padding: 0.5rem 0.75rem;
+                background: #fff;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.03);
+            }
+            .proc-stock-table tbody td {
+                display: grid;
+                grid-template-columns: 7.5rem 1fr;
+                gap: 0.5rem;
+                padding: 0.35rem 0;
+                border: none;
+                align-items: center;
+            }
+            .proc-stock-table tbody td::before {
+                content: attr(data-label);
+                font-size: 0.7rem;
+                font-weight: 600;
+                color: #6b7280;
+                text-transform: uppercase;
+                letter-spacing: 0.025em;
+            }
+            .proc-stock-table tbody td.hidden { display: none !important; }
+            .proc-stock-table tbody td input.pending-input,
+            .proc-stock-table tbody td input.min-input { width: 100%; max-width: 8rem; }
+        }
+        .proc-add-suggestion {
+            cursor: pointer; transition: background 0.15s;
+        }
+        .proc-add-suggestion:hover { background: #ecfeff; }
+
         /* Filter button active states */
         input[type="radio"]:checked + label {
             @apply bg-primary-100 text-primary-700 border-primary-200;
@@ -691,7 +728,7 @@
                                     </div>
                                 </div>
                                 <div class="grid grid-cols-2 gap-2 w-full sm:flex sm:flex-wrap sm:gap-3">
-                                    <button id="proc-open-onhand-modal" class="inline-flex items-center justify-center px-3 py-2 border border-gray-300 rounded-lg text-gray-700 bg-white hover:bg-gray-50 w-full sm:w-auto">
+                                    <button id="proc-open-onhand-modal" class="hidden items-center justify-center px-3 py-2 border border-gray-300 rounded-lg text-gray-700 bg-white hover:bg-gray-50 w-full sm:w-auto">
                                         <i class="bi bi-box-seam mr-2"></i> Parfumi v predalu
                                     </button>
                                     <a id="proc-import-template" href="/api/procurement/vendors/template" class="inline-flex items-center justify-center px-3 py-2 border border-gray-300 rounded-lg text-gray-700 bg-white hover:bg-gray-50 w-full sm:w-auto">
@@ -760,15 +797,17 @@
                                         <span class="px-1.5 py-0.5 rounded border border-gray-300 bg-gray-50 font-mono">Esc</span> zapri
                                     </div>
                                 </div>
-                                <table class="min-w-full divide-y divide-gray-200">
+                                <table id="proc-stock-table" class="min-w-full divide-y divide-gray-200 proc-stock-table">
                                     <thead class="bg-gray-50">
                                         <tr>
                                             <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500">Product No</th>
                                             <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500">Parfum</th>
                                             <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500">Na zalogi</th>
+                                            <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500">Min</th>
                                             <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500">Naročilo</th>
                                             <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500">Oddano</th>
-                                            <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500">Shrani</th>
+                                            <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500">Zadnja prodaja</th>
+                                            <th class="px-4 py-2 text-left text-xs font-semibold text-gray-500 hidden sm:table-cell">Akcije</th>
                                         </tr>
                                     </thead>
                                     <tbody id="proc-stock-body" class="divide-y divide-gray-200 bg-white"></tbody>
@@ -819,6 +858,22 @@
                         </div>
                     </div>
                 </div>
+                <!-- Modal: Zgodovina gibanj zaloge -->
+                <div id="proc-history-modal" class="fixed inset-0 hidden items-center justify-center bg-black/50 z-50">
+                    <div class="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
+                        <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between" style="background-color:#F8FBFC;">
+                            <div>
+                                <h4 class="text-lg font-semibold text-gray-900">Zgodovina gibanj</h4>
+                                <div class="text-xs text-gray-600" id="proc-history-subtitle"></div>
+                            </div>
+                            <button id="proc-history-close" class="text-gray-600 hover:text-gray-800"><i class="bi bi-x-lg"></i></button>
+                        </div>
+                        <div class="p-6 overflow-auto flex-1">
+                            <div id="proc-history-body" class="space-y-2 text-sm"></div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- Modal: Parfumi v predalu -->
                 <div id="proc-onhand-modal" class="fixed inset-0 hidden items-center justify-center bg-black/50 z-50">
                     <div class="bg-white rounded-xl shadow-xl w-full max-w-5xl max-h-[80vh] overflow-hidden flex flex-col">
