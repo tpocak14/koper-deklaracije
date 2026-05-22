@@ -8315,6 +8315,47 @@ let narocilaAbortController = null;
                     if (cnt) cnt.textContent = String(changes);
                     if (bar) bar.classList.toggle('hidden', changes === 0);
                 };
+                // Auto-save a single row's pending value (debounced) and show a
+                // small inline indicator next to the input.
+                const flashSaved = (input, ok = true) => {
+                    if (!input) return;
+                    const cell = input.closest('td');
+                    if (!cell) return;
+                    let badge = cell.querySelector('.proc-saved-badge');
+                    if (!badge) {
+                        badge = document.createElement('span');
+                        badge.className = 'proc-saved-badge ml-2 text-xs font-medium align-middle';
+                        cell.appendChild(badge);
+                    }
+                    badge.textContent = ok ? '✓ Shranjeno' : '✗ Napaka';
+                    badge.style.color = ok ? '#0a8a3a' : '#b91c1c';
+                    badge.style.opacity = '1';
+                    badge.style.transition = 'opacity 1.2s ease';
+                    setTimeout(() => { try { badge.style.opacity = '0'; } catch (_) {} }, 1200);
+                };
+                const autoSaveRow = async (tr) => {
+                    const supplierCur = supplierSelect.value; if (!supplierCur || !tr) return;
+                    const input = tr.querySelector('.pending-input'); if (!input) return;
+                    const isProc = isProcOnlySupplier(supplierCur);
+                    const current = parseInt(tr.getAttribute('data-current-pending') || '0', 10);
+                    const val = Math.max(0, parseInt((input.value || '0'), 10));
+                    if (isNaN(val) || val === current) return;
+                    const product_no = tr.getAttribute('data-product-no');
+                    const proizvajalec_id = tr.getAttribute('data-proizvajalec-id') ? parseInt(tr.getAttribute('data-proizvajalec-id'), 10) : null;
+                    const sku = tr.getAttribute('data-sku');
+                    try {
+                        const endpoint = isProc ? '/api/procurement2/cart/bulk-set' : '/api/procurement/cart/bulk-set';
+                        const body = isProc
+                            ? { supplier: supplierCur, items: [{ sku, qty: val }] }
+                            : { supplier: supplierCur, items: [{ product_no, proizvajalec_id, qty: val }] };
+                        const resp = await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+                        const json = await resp.json().catch(() => ({ success: false }));
+                        if (!resp.ok || !json.success) { flashSaved(input, false); return; }
+                        tr.setAttribute('data-current-pending', String(val));
+                        flashSaved(input, true);
+                        updateBar();
+                    } catch (_) { flashSaved(input, false); }
+                };
                 // annotate current pending as attribute and bind input listeners
                 stockBody.querySelectorAll('tr').forEach(tr => {
                     const isProc = isProcOnlySupplier(supplier);
@@ -8328,7 +8369,40 @@ let narocilaAbortController = null;
                         } catch { return 0; }
                     })();
                     tr.setAttribute('data-current-pending', String(pending));
-                    input.addEventListener('input', updateBar);
+                    // Debounced auto-save on typing (1.5 s after last keystroke).
+                    let debTimer = null;
+                    input.addEventListener('input', () => {
+                        updateBar();
+                        clearTimeout(debTimer);
+                        debTimer = setTimeout(() => autoSaveRow(tr), 1500);
+                    });
+                    // Immediate save on blur or Enter.
+                    input.addEventListener('blur', () => { clearTimeout(debTimer); autoSaveRow(tr); });
+                    input.addEventListener('keydown', (ev) => {
+                        if (ev.key === 'Enter') {
+                            ev.preventDefault();
+                            clearTimeout(debTimer);
+                            autoSaveRow(tr);
+                            // Jump to next row's pending input for fast data entry.
+                            const allInputs = Array.from(stockBody.querySelectorAll('.pending-input'));
+                            const idx = allInputs.indexOf(input);
+                            const next = allInputs[idx + 1];
+                            if (next) { next.focus(); next.select(); }
+                            else { input.blur(); }
+                        } else if (ev.key === 'ArrowDown') {
+                            ev.preventDefault();
+                            const allInputs = Array.from(stockBody.querySelectorAll('.pending-input'));
+                            const idx = allInputs.indexOf(input);
+                            const next = allInputs[idx + 1];
+                            if (next) { next.focus(); next.select(); }
+                        } else if (ev.key === 'ArrowUp') {
+                            ev.preventDefault();
+                            const allInputs = Array.from(stockBody.querySelectorAll('.pending-input'));
+                            const idx = allInputs.indexOf(input);
+                            const prev = allInputs[idx - 1];
+                            if (prev) { prev.focus(); prev.select(); }
+                        }
+                    });
                 });
                 updateBar();
                 // bind save buttons
@@ -8785,6 +8859,12 @@ let narocilaAbortController = null;
         }
 
         supplierSelect && supplierSelect.addEventListener('change', () => {
+            // Persist last selection so the user can resume work without
+            // re-picking a supplier on every page load.
+            try {
+                if (supplierSelect.value) localStorage.setItem('proc:lastSupplier', supplierSelect.value);
+                else localStorage.removeItem('proc:lastSupplier');
+            } catch (_) {}
             // počisti izbor artikla in osveži odvisnosti
             if (productSearch) productSearch.value = '';
             if (productNoInput) productNoInput.value = '';
@@ -9275,6 +9355,14 @@ let narocilaAbortController = null;
 
         await fetchSuppliers();
         await fetchProizvajalci();
+        // Restore last picked supplier (saved in localStorage on change).
+        try {
+            const saved = localStorage.getItem('proc:lastSupplier');
+            if (saved && supplierSelect && Array.from(supplierSelect.options).some(o => o.value === saved)) {
+                supplierSelect.value = saved;
+                supplierSelect.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+        } catch (_) {}
         // Excel import za procurement-only
         try {
             const importInput = document.getElementById('proc-import-file');
@@ -9303,6 +9391,33 @@ let narocilaAbortController = null;
         // avtomatsko naloži stock, če je izbran dobavitelj
         if (supplierSelect && supplierSelect.value) {
             fetchStock();
+        }
+
+        // Global keyboard shortcuts inside the procurement panel:
+        //   "/"   focus stock search (when not typing in another field)
+        //   "Esc" close any open proc modal
+        // Bound once via a sentinel attribute on document.body.
+        if (!document.body.dataset.procKbdBound) {
+            document.body.dataset.procKbdBound = '1';
+            document.addEventListener('keydown', (ev) => {
+                const panel = document.getElementById('procurement-panel');
+                if (!panel || panel.style.display === 'none') return;
+                const tag = (ev.target && ev.target.tagName) ? ev.target.tagName.toLowerCase() : '';
+                const isField = (tag === 'input' || tag === 'textarea' || tag === 'select') || (ev.target && ev.target.isContentEditable);
+                if (ev.key === '/' && !isField) {
+                    const el = document.getElementById('proc-stock-search');
+                    if (el && !el.disabled) { ev.preventDefault(); el.focus(); el.select && el.select(); }
+                } else if (ev.key === 'Escape') {
+                    // Close any open procurement-related modal.
+                    ['proc-onhand-modal', 'po-receive-modal', 'po-images-modal', 'manual-receive-modal'].forEach(id => {
+                        const m = document.getElementById(id);
+                        if (m && !m.classList.contains('hidden')) {
+                            m.classList.add('hidden');
+                            m.classList.remove('flex');
+                        }
+                    });
+                }
+            });
         }
     }
     window.loadProizvajalci = loadProizvajalci;
