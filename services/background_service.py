@@ -268,7 +268,11 @@ def _ensure_declaration_rows(cursor, order_data: dict) -> bool:
             _store_declaration_error(cursor, order_number, "Manjkajo line_items za deklaracijo.")
             return False
 
-    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(line_items, cursor)
+    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(
+        line_items,
+        cursor,
+        shop_domain=order_data.get('shopify_store_domain') if isinstance(order_data, dict) else None,
+    )
     if warnings:
         # Block PDF generation when expiry is too close; show warnings in UI only.
         current_app.logger.warning(

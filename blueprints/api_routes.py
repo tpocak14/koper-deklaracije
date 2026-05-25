@@ -3498,14 +3498,17 @@ def sync_fulfilled_status_endpoint():
                             continue
                         
                         # 2. Pridobi podatke za deklaracijo
+                        _shop_domain_for_decl = order_data.get('shopify_store_domain') if isinstance(order_data, dict) else None
                         line_items_raw = order_data['line_items'] or '[]'
                         line_items = json.loads(line_items_raw) if isinstance(line_items_raw, str) else (line_items_raw or [])
                         if not line_items:
-                            current_app.logger.error(f"Naročilo {order_number} nima line_items")
+                            current_app.logger.error(f"Naročilo {order_number} nima line_items (shop={_shop_domain_for_decl})")
                             continue
                         
                         # 3. Pridobi podatke za deklaracijo
-                        declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(line_items, cursor)
+                        declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(
+                            line_items, cursor, shop_domain=_shop_domain_for_decl,
+                        )
                         
                         if warnings:
                             current_app.logger.warning(
@@ -3664,14 +3667,17 @@ def process_unprocessed_fulfilled_orders():
                     current_app.logger.info(f"Naročilo {order_number} ima že declaration")
                 else:
                     # 1. Pridobi podatke za deklaracijo
+                    _shop_domain_for_decl = order_data.get('shopify_store_domain') if isinstance(order_data, dict) else None
                     line_items_raw = order_data['line_items'] or '[]'
                     line_items = json.loads(line_items_raw) if isinstance(line_items_raw, str) else (line_items_raw or [])
                     if not line_items:
-                        current_app.logger.error(f"Naročilo {order_number} nima line_items")
+                        current_app.logger.error(f"Naročilo {order_number} nima line_items (shop={_shop_domain_for_decl})")
                         continue
                     
                     # 2. Pridobi podatke za deklaracijo
-                    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(line_items, cursor)
+                    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(
+                        line_items, cursor, shop_domain=_shop_domain_for_decl,
+                    )
                     
                     if not declaration_items:
                         current_app.logger.error(f"Ni bilo mogoče pridobiti podatkov za deklaracijo za naročilo {order_number}. Manjkajo: {missing}")
@@ -3695,9 +3701,12 @@ def process_unprocessed_fulfilled_orders():
                 
                 # 4. Generiraj PDF (če še ni)
                 if not order_data['pdf_generated_at']:
+                    _shop_domain_for_decl = order_data.get('shopify_store_domain') if isinstance(order_data, dict) else None
                     line_items_raw = order_data['line_items'] or '[]'
                     line_items = json.loads(line_items_raw) if isinstance(line_items_raw, str) else (line_items_raw or [])
-                    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(line_items, cursor)
+                    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(
+                        line_items, cursor, shop_domain=_shop_domain_for_decl,
+                    )
                     
                     # Pripravimo email_line_items iz line_items
                     email_line_items = []
@@ -3731,9 +3740,12 @@ def process_unprocessed_fulfilled_orders():
                 
                 # 5. Pošlji email (če še ni)
                 if not order_data['email_sent_at']:
+                    _shop_domain_for_decl = order_data.get('shopify_store_domain') if isinstance(order_data, dict) else None
                     line_items_raw = order_data['line_items'] or '[]'
                     line_items = json.loads(line_items_raw) if isinstance(line_items_raw, str) else (line_items_raw or [])
-                    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(line_items, cursor)
+                    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(
+                        line_items, cursor, shop_domain=_shop_domain_for_decl,
+                    )
                     
                     # Pripravimo email_line_items iz line_items
                     email_line_items = []
@@ -9317,27 +9329,46 @@ def run_migration_endpoint():
         }), 500
     finally:
         cursor.close()
-def _pridobi_podatke_za_deklaracijo_iz_shopify(line_items, db_cursor):
+def _pridobi_podatke_za_deklaracijo_iz_shopify(line_items, db_cursor, shop_domain: str | None = None):
     """
     Pridobi podatke za deklaracijo iz line_items, ki imajo samo product_id.
     Pridobi product_no in proizvajalec_ime iz Shopify-ja.
     Združi line_items z istim parfumom (product_no + proizvajalec_ime).
+
+    POMEMBNO: shop_domain MORA biti podan za multi-store setupe. Brez njega
+    Shopify klic uporabi default trgovino in product_id-ji iz drugih
+    trgovin (npr. SI vs EU) bodo silent fail -> prazne deklaracije.
     """
     from services.shopify_service import get_bulk_product_details, clear_product_cache
-    
+
     declaration_items, missing_data_details, expiration_warnings = [], [], []
-    
+
     # Pridobi vse product_id iz line_items
     product_ids = [str(item['product_id']) for item in line_items if item and item.get('product_id')]
-    
+
     if not product_ids:
         missing_data_details.append("Ni product_id v line_items")
         return declaration_items, missing_data_details, expiration_warnings
-    
-    # Počisti cache in pridobi podatke iz Shopify-ja
+
+    # Počisti cache in pridobi podatke iz Shopify-ja (z eksplicitnim shop_domain)
     clear_product_cache()
-    shopify_details = get_bulk_product_details(product_ids)
-    current_app.logger.info(f"Pridobil podatke iz Shopify-ja za {len(product_ids)} izdelkov: {shopify_details}")
+    shopify_details = get_bulk_product_details(product_ids, shop_domain=shop_domain)
+    current_app.logger.info(
+        f"Pridobil podatke iz Shopify-ja (shop={shop_domain or 'default'}) za "
+        f"{len(product_ids)} izdelkov: {shopify_details}"
+    )
+
+    # Multi-store guard: če Shopify ni vrnil ničesar, je to skoraj zagotovo
+    # napaka pri izbiri trgovine (klic pristal na default store, kjer
+    # product_id-ji ne obstajajo). Vrnemo eksplicitno missing_data, da
+    # admin v dnevnem reportu vidi vzrok in lahko popravi.
+    if not shopify_details:
+        missing_data_details.append(
+            f"Shopify ni vrnil podatkov za nobenega od {len(product_ids)} izdelkov "
+            f"(shop_domain='{shop_domain or 'default'}'). Preveri shopify_store_domain "
+            f"na naročilu in Shopify access token za to trgovino."
+        )
+        return declaration_items, missing_data_details, expiration_warnings
     
     # Slovar za združevanje line_items z istim parfumom
     parfum_groups = {}
