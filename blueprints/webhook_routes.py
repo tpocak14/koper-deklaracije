@@ -931,12 +931,18 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                                 f"Webhook {topic} → order_id={order_id}, fulfillment={fulfillment_id}, "
                                 f"status={fulfillment_status}, shipment={shipment_status}, tracking={tracking_no}"
                             )
-                            global last_fulfilled_order
-                            last_fulfilled_order = {
-                                'order_number': f"shopify:{order_id}",
-                                'timestamp': time.time(),
-                                'via': topic,
-                            }
+                            # `last_fulfilled_order` je že deklariran kot global
+                            # v zgornjem `orders/fulfilled` bloku iste funkcije,
+                            # zato ga tukaj samo prisvojimo (Python prepoveduje
+                            # dvojni `global X` v isti funkciji).
+                            try:
+                                last_fulfilled_order = {  # noqa: F841
+                                    'order_number': f"shopify:{order_id}",
+                                    'timestamp': time.time(),
+                                    'via': topic,
+                                }
+                            except Exception:
+                                pass
                         except Exception as e:
                             current_app.logger.error(f"Napaka pri obdelavi {topic} za order {order_id}: {e}")
                             traceback.print_exc()
