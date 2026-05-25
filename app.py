@@ -193,6 +193,27 @@ def create_app():
         if not _disable_safety:
             scheduler.add_job(mandrill_verify_job, 'interval', minutes=60)
 
+        # Layer 2 audit (2x dnevno ob 06:00 in 18:00): scan Mandrill log za
+        # naročila, ki "izgledajo OK" v Flasku ampak NISO dejansko poslana.
+        # Označi te kot kandidate za safety net (reset mk_decl_uploaded_at).
+        def mandrill_log_audit_job():
+            with app.app_context():
+                try:
+                    from services.declaration_safety_net import run_mandrill_log_audit_job
+                    res = run_mandrill_log_audit_job(days_back=10, batch_limit=100)
+                    app.logger.info(
+                        "mandrill_log_audit_job done: mandrill_scanned=%d, db_candidates=%d, "
+                        "missing=%d, marked_for_safety_net=%d, errors=%d",
+                        res['mandrill_msgs_scanned'], res['db_candidates'],
+                        res['candidates_missing_mandrill'], res['marked_for_safety_net'],
+                        res['errors'],
+                    )
+                except Exception as e:
+                    app.logger.error(f"mandrill_log_audit_job error: {e}", exc_info=True)
+
+        if not _disable_safety:
+            scheduler.add_job(mandrill_log_audit_job, 'cron', hour='6,18', minute=0, timezone=lj)
+
         # Daily digest (vsak dan ob 21:30, po dnevnem batchu): povzetek
         # blokiranih naročil + zadnjih Mandrill safety sends.
         def safety_net_daily_digest_job():

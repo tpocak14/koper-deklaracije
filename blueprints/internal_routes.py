@@ -313,6 +313,30 @@ def safety_net_verify():
     return jsonify({'ok': True, 'stats': stats})
 
 
+@internal_bp.route('/safety-net/audit', methods=['POST', 'GET'])
+def safety_net_audit():
+    """Layer 2: scan Mandrill log za 'false positive' uploads.
+
+    Query params:
+      days_back=10  (koliko dni Mandrill log scan-ati)
+      batch_limit=100  (koliko DB kandidatov ovrednotiti)
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    try:
+        days = int(request.args.get('days_back', '10') or 10)
+    except Exception:
+        days = 10
+    try:
+        batch = int(request.args.get('batch_limit', '100') or 100)
+    except Exception:
+        batch = 100
+
+    from services.declaration_safety_net import run_mandrill_log_audit_job
+    stats = run_mandrill_log_audit_job(days_back=days, batch_limit=batch)
+    return jsonify({'ok': True, 'stats': stats})
+
+
 @internal_bp.route('/safety-net/invalidate-parfum/<int:parfum_id>', methods=['POST', 'GET'])
 def safety_net_invalidate_parfum(parfum_id: int):
     """Sprosti block flags za vsa naročila, povezana s tem parfumom.
