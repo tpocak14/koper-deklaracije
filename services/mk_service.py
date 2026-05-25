@@ -1100,7 +1100,38 @@ def mk_attach_declaration_for_order(
         except Exception:
             pass
 
-    # 3) Cache mk_bills tabela.
+    # CRITICAL: MK Mandrill trigger 'deklaracije_si' pošlje samo, če je priponka
+    # na sales_order. Priponke na sales_bill_* ne sprožijo trigger-ja, kar pomeni
+    # da kupec NE dobi deklaracije. Zato VEDNO najprej preverimo sales_order.
+    #
+    # Prej je bila prioriteta: mk_sales_order_id → mk_bill_id → mk_bills cache
+    # → mk_find_bill_any (poišče sales_bill) → ... → sales_order kot LAST RESORT.
+    # To je povzročilo, da je za ~100 naročil v zadnjih 10 dneh priponka
+    # pristala na sales_bill_foreign in Mandrill trigger nikoli ni stekel.
+    #
+    # Nova prioriteta: mk_sales_order_id → search sales_order → šele potem bills.
+
+    # 3) Search sales_order po title (počasno ~10-30s, ampak nujno za Mandrill).
+    if not mk_id or doc_type != 'sales_order':
+        try:
+            so = mk_find_sales_order_by_title(order_ref_clean or order_ref)
+            if not so and order_ref_clean:
+                so = mk_find_sales_order_by_title(order_ref)
+            if so:
+                doc_type = 'sales_order'
+                mk_id = (
+                    so.get('mk_id')
+                    or so.get('id')
+                    or so.get('doc_id')
+                    or _pick_mk_doc_id(so, order_ref)
+                )
+        except Exception as e:
+            try:
+                current_app.logger.warning(f"sales_order search failed for {order_ref}: {e}")
+            except Exception:
+                pass
+
+    # 4) Cache mk_bills tabela (fallback, če sales_order ni najden).
     if not mk_id or not doc_type:
         db_hit = mk_find_bill_in_db(order_ref)
         if not db_hit and order_ref_clean:
@@ -1109,9 +1140,9 @@ def mk_attach_declaration_for_order(
             mk_id = db_hit.get("mk_id")
             doc_type = db_hit.get("doc_type")
 
+    # 5) Drag MK search za bills (zadnji fallback).
     bill = None
     if not mk_id or not doc_type:
-        # Prefer search by title without '#', per MK foreign bills title convention
         bill = mk_find_bill_any(order_ref_clean or order_ref)
         if not bill and order_ref_clean:
             bill = mk_find_bill_any(order_ref)
@@ -1130,19 +1161,6 @@ def mk_attach_declaration_for_order(
         if bill:
             doc_type = doc_type or bill.get("_doc_type") or bill.get("doc_type")
             mk_id = mk_id or _pick_mk_doc_id(bill, order_ref)
-        if (not mk_id or not doc_type) and (order_ref_clean or order_ref):
-            # Fallback to sales_order (MK support: attachments should target sales_order)
-            so = mk_find_sales_order_by_title(order_ref_clean or order_ref)
-            if not so and order_ref_clean:
-                so = mk_find_sales_order_by_title(order_ref)
-            if so:
-                doc_type = 'sales_order'
-                mk_id = (
-                    so.get('mk_id')
-                    or so.get('id')
-                    or so.get('doc_id')
-                    or _pick_mk_doc_id(so, order_ref)
-                )
 
     if not mk_id or not doc_type:
         result["error"] = "bill_not_found"
