@@ -661,8 +661,13 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                 global last_webhook_order
                 last_webhook_order = {'order_number': payload.get('name'), 'timestamp': time.time()}
 
-            elif topic == 'orders/fulfilled':
-                current_app.logger.info("=== OBDELAVA ORDERS/FULFILLED WEBHOOK (BG) ===")
+            elif topic in ('orders/fulfilled', 'orders/partially_fulfilled'):
+                # `orders/partially_fulfilled` pošlje Shopify, ko je naročilo
+                # delno fulfilled (npr. zaradi CODFEE non-shippable line itema).
+                # Za naše potrebe (PDF deklaracija + MK upload) ga obravnavamo
+                # enako kot polno `orders/fulfilled`, ker je perfume del že
+                # odpremljen.
+                current_app.logger.info(f"=== OBDELAVA {topic.upper()} WEBHOOK (BG) ===")
                 shopify_fulfilled_at = payload.get('created_at') if isinstance(payload, dict) else None
                 order_id = None
                 for key in ['order_id', 'id', 'order_number', 'name']:

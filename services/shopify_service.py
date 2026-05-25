@@ -1011,10 +1011,15 @@ def register_webhooks(shop_domain: str | None = None):
         
         # Seznam webhook-ov, ki jih želimo registrirati.
         #
-        # POMEMBNO: `orders/fulfilled` je pri sodobnih Shopify trgovinah večinoma
-        # tih — Shopify v praksi pošilja `fulfillments/create` (in update). Brez
-        # naročnine na fulfillments/* topica naša DB ne dobi `fulfilled_at`,
-        # zato 21:00 batch in MK upload preskočita naročilo.
+        # POMEMBNO za multi-store setup:
+        # - `orders/partially_fulfilled` je KLJUČEN za trgovine, kjer
+        #   naročila vsebujejo non-shippable line item (npr. CODFEE,
+        #   plačilo po povzetju). Ta naročila Shopify označi kot
+        #   "Partially fulfilled" in NE pošlje `orders/fulfilled`.
+        # - `fulfillments/create` / `fulfillments/update` so noviše
+        #   Shopify topica — nekatere trgovine jih še ne podpirajo
+        #   (vrnejo 422 "Invalid topic"). V tem primeru gracefully
+        #   ignoriramo error in nadaljujemo z ostalimi.
         webhooks_to_register = [
             {
                 'topic': 'orders/create',
@@ -1023,6 +1028,11 @@ def register_webhooks(shop_domain: str | None = None):
             },
             {
                 'topic': 'orders/fulfilled',
+                'address': f"{base_url}/webhook/order-fulfilled",
+                'format': 'json'
+            },
+            {
+                'topic': 'orders/partially_fulfilled',
                 'address': f"{base_url}/webhook/order-fulfilled",
                 'format': 'json'
             },
