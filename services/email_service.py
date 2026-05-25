@@ -977,8 +977,25 @@ def poslji_obvestilo_o_narocilu_z_manjkajocimi_podatki(order_number, missing_dat
         return False
 
 
-def poslji_mk_deklaracije_report(order_numbers, *, window_days: int, sent_at=None, stats=None):
-    """Pošlje adminu seznam naročil, katerim je bila dodana deklaracija v MK."""
+def poslji_mk_deklaracije_report(
+    order_numbers,
+    *,
+    window_days: int,
+    sent_at=None,
+    stats=None,
+    failed_orders=None,
+    no_pdf_orders=None,
+    prior_uploaded_orders=None,
+):
+    """Pošlje adminu povzetek dnevnega batcha MK deklaracij.
+
+    Razdeljeno na 4 sekcije:
+      - ✅ Naloženo zdaj (uspeli MK upload-i v tem batchu)
+      - ❌ Neuspeli MK upload (z razlogom, kjer je možno)
+      - ⚠️ Fulfilled brez PDF (manjkajoči podatki / preveč star rok)
+      - ℹ️ Že naloženo prej (hourly reconcile, isti delovni dan)
+    """
+    import html as html_lib
     try:
         recipient = current_app.config.get('ADMIN_EMAIL')
         if not recipient:
@@ -996,44 +1013,222 @@ def poslji_mk_deklaracije_report(order_numbers, *, window_days: int, sent_at=Non
         if sent_at is None:
             sent_at = datetime.now()
 
-        orders = [str(o).lstrip('#') for o in (order_numbers or []) if str(o).strip()]
-        orders = sorted(set(orders), key=lambda x: int(x) if x.isdigit() else x)
-        count = len(orders)
-        period = f"{window_days} dni"
+        # Admin UI base URL (deep-link za vsak order_number)
+        admin_base = (
+            current_app.config.get('ADMIN_NEXT_BASE_URL')
+            or os.environ.get('ADMIN_NEXT_BASE_URL')
+            or 'https://koper-deklaracije-v2.vercel.app'
+        ).rstrip('/')
 
-        rows_html = "".join(
-            f"<li style='margin:2px 0'>#{o}</li>" for o in orders
-        ) or "<li>Ni novih nalaganj v MK v tem ciklu.</li>"
+        def _esc(v) -> str:
+            return html_lib.escape(str(v) if v is not None else '', quote=True)
 
+        def _norm(o) -> str:
+            return str(o).lstrip('#').strip() if o is not None else ''
+
+        def _sort_key(s: str):
+            return int(s) if s.isdigit() else 10**18
+
+        def _order_link(num: str) -> str:
+            # Naš Next.js detail page uporablja path /narocila/<order_number>
+            n = _norm(num)
+            return f"{admin_base}/narocila/{_esc(n)}"
+
+        def _human_reason(reason: str) -> str:
+            r = (reason or '').strip()
+            mapping = {
+                'bill_not_found':           'Račun (sales_bill/sales_order) v MK ni najden — preveri MK ali shrani mk_bill_id.',
+                'pdf_missing':              'PDF se ni generiral (najverjetneje manjkajo INCI/serija/rok).',
+                'mk_add_attachment_failed': 'MK API je zavrnil prilogo (duplikat, dokument zaklenjen ali interna napaka MK).',
+                'unknown_error':            'Neznana napaka (preveri logs).',
+            }
+            if r in mapping:
+                return mapping[r]
+            if r.startswith('pdf_error:'):
+                return f"Napaka pri generiranju PDF: {r.split(':', 1)[1]}"
+            if r.startswith('pdf_base64_error:'):
+                return f"PDF base64 napaka: {r.split(':', 1)[1]}"
+            if r.startswith('exception:'):
+                return f"Izjema: {r.split(':', 1)[1].strip()}"
+            return r or '(brez razloga)'
+
+        # Normalize inputs
+        ok_orders = sorted(
+            {_norm(o) for o in (order_numbers or []) if _norm(o)},
+            key=_sort_key,
+        )
+        prior_orders = sorted(
+            {_norm(o) for o in (prior_uploaded_orders or []) if _norm(o)},
+            key=_sort_key,
+        )
+        # Avoid duplicates between "zdaj" and "prej"
+        prior_orders = [p for p in prior_orders if p not in set(ok_orders)]
+
+        # Failed (list of {order_number, reason})
+        failed_list = []
+        seen_failed = set()
+        for it in (failed_orders or []):
+            if not isinstance(it, dict):
+                continue
+            on = _norm(it.get('order_number'))
+            if not on or on in seen_failed:
+                continue
+            seen_failed.add(on)
+            failed_list.append({
+                'order_number': on,
+                'reason': str(it.get('reason') or '').strip(),
+            })
+        failed_list.sort(key=lambda x: _sort_key(x['order_number']))
+
+        # No-PDF (manjkajoči podatki)
+        no_pdf_list = []
+        seen_no_pdf = set()
+        for it in (no_pdf_orders or []):
+            if not isinstance(it, dict):
+                continue
+            on = _norm(it.get('order_number'))
+            if not on or on in seen_no_pdf:
+                continue
+            seen_no_pdf.add(on)
+            no_pdf_list.append({
+                'order_number': on,
+                'reason': str(it.get('reason') or '').strip(),
+            })
+        no_pdf_list.sort(key=lambda x: _sort_key(x['order_number']))
+
+        n_ok = len(ok_orders)
+        n_fail = len(failed_list)
+        n_no_pdf = len(no_pdf_list)
+        n_prior = len(prior_orders)
+
+        # Subject: scoreboard + datum
+        date_label = sent_at.strftime('%d.%m.%Y')
+        subject = (
+            f"MK deklaracije {date_label}: "
+            f"{n_ok} ✅"
+            + (f" / {n_fail} ❌" if n_fail else "")
+            + (f" / {n_no_pdf} ⚠️" if n_no_pdf else "")
+        )
+
+        # ----- HTML stilske helperje -----
+        TH = "padding:8px 10px;border:1px solid #e5e7eb;background:#f9fafb;text-align:left;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#374151"
+        TD = "padding:8px 10px;border:1px solid #e5e7eb;font-size:13px;vertical-align:top"
+        TBL = "border-collapse:collapse;width:100%;margin:6px 0 14px 0"
+        LINK = "color:#4f46e5;text-decoration:none"
+
+        def _table_simple(orders: list, header_label: str, badge_color: str) -> str:
+            if not orders:
+                return ""
+            rows = "".join(
+                f"<tr>"
+                f"<td style='{TD};width:120px'>"
+                f"<a href='{_order_link(o)}' style='{LINK}' target='_blank'>#{_esc(o)}</a>"
+                f"</td>"
+                f"<td style='{TD};color:#6b7280'>—</td>"
+                f"</tr>"
+                for o in orders
+            )
+            return (
+                f"<table style='{TBL}'>"
+                f"<thead><tr>"
+                f"<th style='{TH}'><span style=\"color:{badge_color}\">●</span> Naročilo</th>"
+                f"<th style='{TH}'>{_esc(header_label)}</th>"
+                f"</tr></thead>"
+                f"<tbody>{rows}</tbody></table>"
+            )
+
+        def _table_with_reason(items: list, header_label: str, badge_color: str) -> str:
+            if not items:
+                return ""
+            rows = "".join(
+                f"<tr>"
+                f"<td style='{TD};width:120px'>"
+                f"<a href='{_order_link(it['order_number'])}' style='{LINK}' target='_blank'>#{_esc(it['order_number'])}</a>"
+                f"</td>"
+                f"<td style='{TD}'>{_esc(_human_reason(it['reason']))}</td>"
+                f"</tr>"
+                for it in items
+            )
+            return (
+                f"<table style='{TBL}'>"
+                f"<thead><tr>"
+                f"<th style='{TH}'><span style=\"color:{badge_color}\">●</span> Naročilo</th>"
+                f"<th style='{TH}'>{_esc(header_label)}</th>"
+                f"</tr></thead>"
+                f"<tbody>{rows}</tbody></table>"
+            )
+
+        # ----- Statistike (zgornja KPI vrstica) -----
         stats = stats or {}
-        fulfilled_today = stats.get("fulfilled_today")
-        pdf_today = stats.get("pdf_today")
-        mk_today = stats.get("mk_today")
-        missing_mk_today = stats.get("missing_mk_today")
-        missing_mk_text = "prazno" if missing_mk_today in (None, 0, "0") else str(missing_mk_today)
+        kpi = lambda label, val, color="#111827": (
+            f"<td style='padding:10px 14px;border:1px solid #e5e7eb;border-radius:8px;background:#fff;'>"
+            f"<div style='font-size:11px;color:#6b7280;text-transform:uppercase;letter-spacing:.04em'>{_esc(label)}</div>"
+            f"<div style='font-size:22px;font-weight:700;color:{color};margin-top:2px'>{_esc(val if val is not None else '–')}</div>"
+            f"</td>"
+        )
+        kpi_row = (
+            "<table style='border-collapse:separate;border-spacing:8px;margin:0 -8px 14px -8px'>"
+            "<tr>"
+            f"{kpi('Fulfilled danes', stats.get('fulfilled_today'))}"
+            f"{kpi('PDF generirano', stats.get('pdf_today'), '#4f46e5')}"
+            f"{kpi('MK upload', stats.get('mk_today'), '#16a34a')}"
+            f"{kpi('Manjka MK', stats.get('missing_mk_today'), '#dc2626' if (stats.get('missing_mk_today') or 0) else '#6b7280')}"
+            "</tr></table>"
+        )
 
-        stats_rows = ""
-        if any(v is not None for v in (fulfilled_today, pdf_today, mk_today, missing_mk_today)):
-            stats_rows = f"""
-            <tr><td style='padding:6px 10px;border:1px solid #e5e7eb'>FULFILLED danes</td><td style='padding:6px 10px;border:1px solid #e5e7eb;text-align:right'>{fulfilled_today if fulfilled_today is not None else '-'}</td></tr>
-            <tr><td style='padding:6px 10px;border:1px solid #e5e7eb'>PDF</td><td style='padding:6px 10px;border:1px solid #e5e7eb;text-align:right'>{pdf_today if pdf_today is not None else '-'}</td></tr>
-            <tr><td style='padding:6px 10px;border:1px solid #e5e7eb'>MK upload</td><td style='padding:6px 10px;border:1px solid #e5e7eb;text-align:right'>{mk_today if mk_today is not None else '-'}</td></tr>
-            <tr><td style='padding:6px 10px;border:1px solid #e5e7eb'>MISSING MK</td><td style='padding:6px 10px;border:1px solid #e5e7eb;text-align:right'>{missing_mk_text}</td></tr>
-            """
+        # ----- Sestavi sekcije -----
+        sections_html = []
+        if n_ok:
+            sections_html.append(
+                f"<h3 style='font-size:15px;margin:16px 0 6px;color:#16a34a'>✅ Naloženo v MK v tem batchu ({n_ok})</h3>"
+                + _table_simple(ok_orders, "Status", "#16a34a")
+            )
+        if n_fail:
+            sections_html.append(
+                f"<h3 style='font-size:15px;margin:16px 0 6px;color:#dc2626'>❌ Neuspeli MK upload ({n_fail})</h3>"
+                + _table_with_reason(failed_list, "Razlog", "#dc2626")
+            )
+        if n_no_pdf:
+            sections_html.append(
+                f"<h3 style='font-size:15px;margin:16px 0 6px;color:#d97706'>⚠️ Fulfilled brez PDF ({n_no_pdf})</h3>"
+                + "<div style='font-size:12px;color:#6b7280;margin-bottom:6px'>"
+                + "Tem naročilom <strong>stranka NE bo prejela deklaracije</strong> dokler ne dopolnimo podatkov. "
+                + "Po popravku jih bo hourly reconcile job samodejno potegnil v MK."
+                + "</div>"
+                + _table_with_reason(no_pdf_list, "Manjka", "#d97706")
+            )
+        if n_prior:
+            sections_html.append(
+                f"<h3 style='font-size:15px;margin:16px 0 6px;color:#6b7280'>ℹ️ Že naloženo prej istega dne ({n_prior})</h3>"
+                + "<div style='font-size:12px;color:#6b7280;margin-bottom:6px'>"
+                + "Hourly reconcile job (vsako uro) je naročilo že naložil pred 21:00 batchem."
+                + "</div>"
+                + _table_simple(prior_orders, "Status", "#6b7280")
+            )
 
-        subject = f"MK deklaracije: dodane {count} (zadnjih {period})"
+        if not sections_html:
+            sections_html.append(
+                "<div style='padding:14px;border:1px dashed #e5e7eb;border-radius:8px;color:#6b7280;text-align:center'>"
+                "V tem ciklu ni novih aktivnosti glede MK deklaracij.</div>"
+            )
+
+        period_text = "danes" if window_days == 1 else f"zadnjih {window_days} dni"
         html_body = f"""
-        <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;">
-          <h2>MK deklaracije – dnevni report</h2>
-          <div><strong>Čas:</strong> {sent_at.strftime('%d.%m.%Y %H:%M')}</div>
-          <div><strong>Okno:</strong> zadnjih {period}</div>
-          <div><strong>Število dodanih:</strong> {count}</div>
-          {f"<table style='border-collapse:collapse;font-size:13px;margin:12px 0'><tbody>{stats_rows}</tbody></table>" if stats_rows else ""}
-          <hr style="margin:12px 0;border:none;border-top:1px solid #e5e7eb" />
-          <div><strong>Seznam naročil:</strong></div>
-          <ul style="margin:6px 0 0 18px;padding:0;">
-            {rows_html}
-          </ul>
+        <div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:760px;margin:0 auto;color:#111827;background:#f3f4f6;padding:18px">
+          <div style="background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:22px">
+            <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;border-bottom:1px solid #e5e7eb;padding-bottom:12px;margin-bottom:14px">
+              <h2 style="margin:0;font-size:18px">MK deklaracije — dnevni report</h2>
+              <div style="font-size:12px;color:#6b7280">{_esc(sent_at.strftime('%d.%m.%Y %H:%M'))}</div>
+            </div>
+            <div style="font-size:13px;color:#374151;margin-bottom:14px">
+              Pregled za <strong>{_esc(period_text)}</strong>. Logika: ob 21:00 generiramo PDF deklaracije za vsa fulfilled naročila in jih naložimo v MK. MK nato preko Mandrilla pošlje račun s prilogo stranki, ko označi naročilo kot <em>Zaključeno</em>.
+            </div>
+            {kpi_row}
+            {''.join(sections_html)}
+            <div style="margin-top:18px;font-size:11px;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:10px">
+              Pošiljevalec: APP background scheduler · Tehnika: <code style="background:#f3f4f6;padding:1px 4px;border-radius:4px">process_fulfilled_orders_daily(window_days={_esc(window_days)})</code>
+            </div>
+          </div>
         </div>
         """
 
@@ -1050,4 +1245,5 @@ def poslji_mk_deklaracije_report(order_numbers, *, window_days: int, sent_at=Non
         return True
     except Exception as e:
         current_app.logger.error(f"Napaka pri pošiljanju MK reporta: {e}")
+        traceback.print_exc()
         return False

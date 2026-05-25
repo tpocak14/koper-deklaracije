@@ -362,8 +362,11 @@ def process_fulfilled_orders_daily(window_days: int = 1) -> None:
         db.commit()
         current_app.logger.info(f"BACKGROUND: Daily declarations generated={processed} / total={len(rows)}")
 
-        # Phase 2: after PDF generation, upload to MK
-        mk_uploaded_orders = []
+        # Phase 2: after PDF generation, upload to MK.
+        # We collect both successes and failures (with reason) so the
+        # admin report can show what went wrong per order.
+        mk_uploaded_orders: list[str] = []
+        mk_failed_orders: list[dict] = []  # {order_number, reason}
         try:
             cursor.execute(
                 """
@@ -402,11 +405,96 @@ def process_fulfilled_orders_daily(window_days: int = 1) -> None:
                                 (on, f"#{str(on).replace('#','')}")
                             )
                             mk_uploaded_orders.append(on)
+                        else:
+                            reason = attach_res.get("error") or "unknown_error"
+                            mk_failed_orders.append({
+                                "order_number": on,
+                                "reason": str(reason),
+                            })
+                            # Record that we tried so reconcile knows.
+                            cursor.execute(
+                                """
+                                UPDATE orders
+                                SET mk_decl_upload_checked_at = NOW()
+                                WHERE order_number = %s OR order_number = %s
+                                """,
+                                (on, f"#{str(on).replace('#','')}")
+                            )
                     except Exception as se:
                         current_app.logger.error(f"BACKGROUND: MK attach error for {on}: {se}")
+                        mk_failed_orders.append({
+                            "order_number": on,
+                            "reason": f"exception: {se}",
+                        })
                 db.commit()
         except Exception as e:
             current_app.logger.error(f"BACKGROUND: MK upload phase failed: {e}")
+
+        # Phase 2b: find fulfilled orders in window which still have NO PDF
+        # (typically missing data, expired serija, no perfume items, ...). The
+        # admin report needs to surface these prominently — they will NOT get
+        # a customer email and need manual review.
+        no_pdf_orders: list[dict] = []
+        try:
+            cursor.execute(
+                """
+                SELECT order_number, has_missing_data, missing_data_details, status
+                FROM orders
+                WHERE (fulfilled_at IS NOT NULL OR shopify_fulfilled_at IS NOT NULL)
+                  AND COALESCE(fulfilled_at, shopify_fulfilled_at) BETWEEN %s AND %s
+                  AND pdf_generated_at IS NULL
+                ORDER BY COALESCE(fulfilled_at, shopify_fulfilled_at) DESC
+                """,
+                (start_utc, end_utc),
+            )
+            no_pdf_rows = cursor.fetchall() or []
+            for r in no_pdf_rows:
+                if not isinstance(r, dict):
+                    continue
+                on = r.get('order_number')
+                if not on:
+                    continue
+                details = r.get('missing_data_details')
+                reason_text = "Manjkajoči podatki" if r.get('has_missing_data') else "PDF ni generiran"
+                if isinstance(details, str) and details:
+                    try:
+                        parsed = json.loads(details)
+                        if isinstance(parsed, list) and parsed:
+                            reason_text = "; ".join(str(x) for x in parsed)
+                        elif isinstance(parsed, str) and parsed:
+                            reason_text = parsed
+                    except Exception:
+                        reason_text = details
+                no_pdf_orders.append({
+                    "order_number": on,
+                    "reason": reason_text,
+                })
+        except Exception as e:
+            current_app.logger.error(f"BACKGROUND: no-PDF scan failed: {e}")
+
+        # Phase 2c: orders that were already uploaded BEFORE this 21:00 run
+        # (e.g. picked up by the hourly reconcile job). These belong in the
+        # report so the admin sees the full picture for the day.
+        prior_uploaded_orders: list[str] = []
+        try:
+            cursor.execute(
+                """
+                SELECT order_number
+                FROM orders
+                WHERE (fulfilled_at IS NOT NULL OR shopify_fulfilled_at IS NOT NULL)
+                  AND COALESCE(fulfilled_at, shopify_fulfilled_at) BETWEEN %s AND %s
+                  AND mk_decl_uploaded_at IS NOT NULL
+                  AND NOT (mk_decl_uploaded_at >= %s AND mk_decl_uploaded_at <= %s)
+                ORDER BY COALESCE(fulfilled_at, shopify_fulfilled_at) DESC
+                """,
+                (start_utc, end_utc, start_utc, end_utc),
+            )
+            prior_rows = cursor.fetchall() or []
+            for r in prior_rows:
+                if isinstance(r, dict) and r.get('order_number'):
+                    prior_uploaded_orders.append(r['order_number'])
+        except Exception as e:
+            current_app.logger.error(f"BACKGROUND: prior-uploaded scan failed: {e}")
         # Email report (even if empty)
         try:
             # Stats for today (Ljubljana day)
@@ -472,6 +560,9 @@ def process_fulfilled_orders_daily(window_days: int = 1) -> None:
                     "mk_today": mk_today,
                     "missing_mk_today": missing_mk_today,
                 },
+                failed_orders=mk_failed_orders,
+                no_pdf_orders=no_pdf_orders,
+                prior_uploaded_orders=prior_uploaded_orders,
             )
         except Exception as e:
             current_app.logger.error(f"BACKGROUND: MK report email failed: {e}")
