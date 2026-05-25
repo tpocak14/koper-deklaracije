@@ -148,7 +148,99 @@ def create_app():
                     app.logger.error(f"Napaka pri nočnem retail delta importu: {e}")
 
         scheduler.add_job(retail_delta_job, 'cron', hour=1, minute=30)
-        
+
+        # Declaration safety net (vsako uro): smart retry za manjkajoče deklaracije.
+        # Razlika od declaration_reconcile_job: ta job NE retry-a "blocked" naročil
+        # (manjkajoča INCI/serije/metafields), čaka na invalidation hook. Za
+        # 'completed' MK naročila brez priponke direktno pošlje prek Mandrill API.
+        def declaration_safety_net_job():
+            with app.app_context():
+                try:
+                    from services.declaration_safety_net import run_safety_net_job
+                    window = int(os.environ.get('SAFETY_NET_WINDOW_DAYS', '14') or 14)
+                    batch = int(os.environ.get('SAFETY_NET_BATCH_LIMIT', '50') or 50)
+                    res = run_safety_net_job(window_days=window, batch_limit=batch)
+                    app.logger.info(
+                        "declaration_safety_net_job done: scanned=%d, blocked=%d, "
+                        "uploaded_mk_only=%d, uploaded_and_mandrill=%d, errors=%d",
+                        res['scanned'], res['blocked'], res['uploaded_mk_only'],
+                        res['uploaded_and_mandrill'], res['errors'],
+                    )
+                except Exception as e:
+                    app.logger.error(f"declaration_safety_net_job error: {e}", exc_info=True)
+
+        _disable_safety = _disable_all or (os.environ.get('DISABLE_SAFETY_NET_JOB', '') or '').strip().lower() in ('1', 'true', 'yes')
+        if not _disable_safety:
+            _safety_min = int(os.environ.get('SAFETY_NET_INTERVAL_MIN', '60') or 60)
+            scheduler.add_job(declaration_safety_net_job, 'interval', minutes=_safety_min)
+        else:
+            app.logger.warning("declaration_safety_net_job DISABLED via env")
+
+        # Mandrill verify job (vsako uro, z zamikom 15 min): preveri status
+        # nedavnih direktnih Mandrill safety sends — bounce/reject → admin alert.
+        def mandrill_verify_job():
+            with app.app_context():
+                try:
+                    from services.declaration_safety_net import run_mandrill_verify_job
+                    res = run_mandrill_verify_job()
+                    app.logger.info(
+                        "mandrill_verify_job done: checked=%d, updated=%d, failures=%d",
+                        res['checked'], res['updated'], res['failures'],
+                    )
+                except Exception as e:
+                    app.logger.error(f"mandrill_verify_job error: {e}", exc_info=True)
+
+        if not _disable_safety:
+            scheduler.add_job(mandrill_verify_job, 'interval', minutes=60)
+
+        # Daily digest (vsak dan ob 21:30, po dnevnem batchu): povzetek
+        # blokiranih naročil + zadnjih Mandrill safety sends.
+        def safety_net_daily_digest_job():
+            with app.app_context():
+                try:
+                    from database import get_db
+                    from services.email_service import poslji_safety_net_daily_digest
+
+                    db = get_db()
+                    cursor = db.cursor()
+                    cursor.execute(
+                        """
+                        SELECT order_number, pdf_generation_blocked_codes AS codes,
+                               pdf_generation_blocked_reason AS reason
+                          FROM orders
+                         WHERE requires_declaration = TRUE
+                           AND mk_decl_uploaded_at IS NULL
+                           AND pdf_generation_blocked_reason IS NOT NULL
+                         ORDER BY created_at DESC
+                         LIMIT 200
+                        """
+                    )
+                    blocked = [dict(r) if not isinstance(r, dict) else r for r in cursor.fetchall()]
+
+                    cursor.execute(
+                        """
+                        SELECT order_number, mandrill_safety_status AS status, customer_email AS email
+                          FROM orders
+                         WHERE mandrill_safety_attempted_at > NOW() - INTERVAL '24 hours'
+                         ORDER BY mandrill_safety_attempted_at DESC
+                         LIMIT 200
+                        """
+                    )
+                    sends = [dict(r) if not isinstance(r, dict) else r for r in cursor.fetchall()]
+                    cursor.close()
+
+                    poslji_safety_net_daily_digest(
+                        stats={'scanned': len(blocked) + len(sends), 'uploaded_mk_only': 0,
+                               'uploaded_and_mandrill': len(sends), 'errors': 0},
+                        blocked_orders=blocked,
+                        recent_safety_sends=sends,
+                    )
+                except Exception as e:
+                    app.logger.error(f"safety_net_daily_digest_job error: {e}", exc_info=True)
+
+        if not _disable_safety:
+            scheduler.add_job(safety_net_daily_digest_job, 'cron', hour=21, minute=30, timezone=lj)
+
         scheduler.start()
 
     return app

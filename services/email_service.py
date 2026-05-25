@@ -1247,3 +1247,172 @@ def poslji_mk_deklaracije_report(
         current_app.logger.error(f"Napaka pri pošiljanju MK reporta: {e}")
         traceback.print_exc()
         return False
+
+
+# ---------------------------------------------------------------------------
+# Safety net alerts (instant + daily digest)
+# ---------------------------------------------------------------------------
+
+def _safety_net_send_html(subject: str, html_body: str) -> bool:
+    """Pošlje HTML email adminu (interna funkcija za safety net alerts)."""
+    try:
+        recipient = current_app.config.get('ADMIN_EMAIL')
+        if not recipient:
+            current_app.logger.error("ADMIN_EMAIL ni nastavljen, safety net alert ne bo poslan.")
+            return False
+        smtp_server = current_app.config.get('MAIL_SERVER')
+        smtp_port = current_app.config.get('MAIL_PORT', 587)
+        username = current_app.config.get('MAIL_USERNAME')
+        password = current_app.config.get('MAIL_PASSWORD')
+        if not (smtp_server and username and password):
+            current_app.logger.error("SMTP ni konfiguriran, safety net alert ne bo poslan.")
+            return False
+
+        msg = MIMEMultipart()
+        msg['From'] = username
+        msg['To'] = recipient
+        msg['Subject'] = subject
+        msg.attach(MIMEText(html_body, 'html'))
+
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            server.login(username, password)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        current_app.logger.error(f"Safety net alert send error: {e}")
+        traceback.print_exc()
+        return False
+
+
+def poslji_safety_net_instant_alert(order_data: dict, analysis: dict) -> bool:
+    """Instant alert za blokirano naročilo, ki je staro >7 dni.
+
+    Pošlje takoj, ko safety net cron prvič zazna blokado pri starem naročilu
+    (critical_alert_sent_at se nato nastavi, da ne spam-amo).
+    """
+    import html as html_lib
+    order_number = order_data.get('order_number') or '?'
+    customer = order_data.get('customer_name') or order_data.get('customer_email') or '?'
+    created = order_data.get('created_at')
+    created_str = str(created)[:10] if created else '?'
+    codes = analysis.get('blocked_codes') or []
+    missing = analysis.get('missing') or []
+
+    admin_base = (current_app.config.get('ADMIN_NEXT_BASE_URL')
+                  or os.environ.get('ADMIN_NEXT_BASE_URL')
+                  or 'https://koper-deklaracije-v2.vercel.app').rstrip('/')
+    order_url = f"{admin_base}/narocila/{html_lib.escape(str(order_number).lstrip('#'))}"
+
+    codes_html = "".join(
+        f"<li><code style='background:#fee2e2;padding:2px 6px;border-radius:4px'>{html_lib.escape(c)}</code></li>"
+        for c in codes
+    )
+    missing_html = "".join(f"<li>{html_lib.escape(str(m))}</li>" for m in missing)
+
+    html_body = f"""
+    <div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #fecaca">
+      <div style="background:#dc2626;color:#fff;padding:14px 20px;font-size:15px;font-weight:600">
+        🚨 Deklaracija blokirana — staro naročilo
+      </div>
+      <div style="padding:18px 20px;font-size:14px;color:#374151;line-height:1.6">
+        <p><strong>Naročilo:</strong> <a href="{order_url}" style="color:#dc2626">{html_lib.escape(str(order_number))}</a></p>
+        <p><strong>Kupec:</strong> {html_lib.escape(str(customer))}</p>
+        <p><strong>Ustvarjeno:</strong> {html_lib.escape(created_str)}</p>
+        <p style="margin-top:14px"><strong>Razlogi blokade:</strong></p>
+        <ul style="margin:6px 0 12px 18px">{missing_html}</ul>
+        <p><strong>Code-i (za invalidation):</strong></p>
+        <ul style="margin:6px 0 12px 18px">{codes_html}</ul>
+        <div style="margin-top:16px;padding:10px;background:#fef3c7;border-radius:8px;font-size:13px">
+          ⚠️ Stranka <strong>NE</strong> bo prejela deklaracije, dokler ne vneseš manjkajočih podatkov.
+          Po popravku se naročilo avtomatsko odblokira (smart invalidation hook).
+        </div>
+        <p style="margin-top:18px;font-size:12px;color:#6b7280">
+          Naročilo je starejše od 7 dni — ker stranka že čaka, je nujno čimprej rešiti.
+        </p>
+      </div>
+    </div>
+    """
+    subject = f"🚨 [URGENT] Deklaracija blokirana: {order_number}"
+    return _safety_net_send_html(subject, html_body)
+
+
+def poslji_safety_net_daily_digest(stats: dict, blocked_orders: list, recent_safety_sends: list) -> bool:
+    """Dnevni povzetek safety net dejavnosti (ob 21:30, po dnevnem batchu)."""
+    import html as html_lib
+
+    admin_base = (current_app.config.get('ADMIN_NEXT_BASE_URL')
+                  or os.environ.get('ADMIN_NEXT_BASE_URL')
+                  or 'https://koper-deklaracije-v2.vercel.app').rstrip('/')
+
+    def order_link(o):
+        n = html_lib.escape(str(o or '').lstrip('#'))
+        return f'<a href="{admin_base}/narocila/{n}" style="color:#2563eb;text-decoration:none">#{n}</a>'
+
+    blocked_rows = ""
+    for b in (blocked_orders or [])[:50]:
+        codes_str = ", ".join(b.get('codes') or [])
+        blocked_rows += f"""
+        <tr>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6">{order_link(b.get('order_number'))}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280">
+            <code style="background:#fee2e2;padding:1px 4px;border-radius:3px">{html_lib.escape(codes_str)}</code>
+          </td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280">
+            {html_lib.escape(str(b.get('reason') or '')[:120])}
+          </td>
+        </tr>"""
+
+    sends_rows = ""
+    for s in (recent_safety_sends or [])[:50]:
+        sends_rows += f"""
+        <tr>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6">{order_link(s.get('order_number'))}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6">{html_lib.escape(str(s.get('status') or ''))}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f3f4f6;font-size:12px;color:#6b7280">{html_lib.escape(str(s.get('email') or ''))}</td>
+        </tr>"""
+
+    n_blocked = len(blocked_orders or [])
+    n_sends = len(recent_safety_sends or [])
+
+    html_body = f"""
+    <div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:720px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb">
+      <div style="background:linear-gradient(90deg,#4f46e5,#7c3aed);color:#fff;padding:14px 20px;font-size:15px;font-weight:600">
+        📊 Safety net dnevni povzetek
+      </div>
+      <div style="padding:18px 20px;font-size:14px;color:#374151">
+        <p style="margin:0 0 14px">
+          <strong>Scanned:</strong> {stats.get('scanned', 0)} ·
+          <strong style="color:#dc2626">Blocked:</strong> {n_blocked} ·
+          <strong style="color:#16a34a">Uspesno v MK:</strong> {stats.get('uploaded_mk_only', 0)} ·
+          <strong style="color:#7c3aed">Mandrill safety sends:</strong> {stats.get('uploaded_and_mandrill', 0)} ·
+          <strong>Errors:</strong> {stats.get('errors', 0)}
+        </p>
+
+        {('<h3 style="font-size:14px;margin:18px 0 6px;color:#dc2626">🚨 Trenutno blokirana naročila ({})</h3>'
+          '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+          '<thead style="background:#f9fafb"><tr>'
+          '<th style="text-align:left;padding:6px 10px">Naročilo</th>'
+          '<th style="text-align:left;padding:6px 10px">Codes</th>'
+          '<th style="text-align:left;padding:6px 10px">Razlog</th>'
+          '</tr></thead><tbody>'
+          f'{blocked_rows}</tbody></table>').format(n_blocked) if n_blocked else ''}
+
+        {('<h3 style="font-size:14px;margin:18px 0 6px;color:#7c3aed">💌 Direktni Mandrill sends (zadnji dan)</h3>'
+          '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+          '<thead style="background:#f9fafb"><tr>'
+          '<th style="text-align:left;padding:6px 10px">Naročilo</th>'
+          '<th style="text-align:left;padding:6px 10px">Status</th>'
+          '<th style="text-align:left;padding:6px 10px">Email</th>'
+          '</tr></thead><tbody>'
+          f'{sends_rows}</tbody></table>') if n_sends else ''}
+
+        <div style="margin-top:18px;font-size:11px;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:10px">
+          Safety net job teče vsako uro · invalidation se sproži ob vnosu serije/INCI/metafield
+        </div>
+      </div>
+    </div>
+    """
+    today = datetime.now().strftime('%d.%m.%Y')
+    subject = f"📊 Safety net povzetek {today} — {n_blocked} blokiranih"
+    return _safety_net_send_html(subject, html_body)

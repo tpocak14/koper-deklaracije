@@ -5460,6 +5460,28 @@ def add_or_update_perfume():
             perfume_id = result['id'] if result else None
         
         conn.commit()
+
+        # Safety net: vnos/popravek INCI ali metafield-ov lahko odblokira
+        # naročila, ki so bila blokirana z 'missing_inci' ali 'parfum_not_in_db'.
+        # Sprosti njihove block flag-e, da jih naslednji safety net cron retry-a.
+        if perfume_id and sestava_inci:
+            try:
+                from services.declaration_safety_net import (
+                    invalidate_blocks_for_parfum,
+                    CODE_MISSING_INCI,
+                    CODE_PARFUM_NOT_IN_DB,
+                    CODE_MISSING_METAFIELDS,
+                )
+                unblocked = invalidate_blocks_for_parfum(
+                    perfume_id,
+                    codes=[CODE_MISSING_INCI, CODE_PARFUM_NOT_IN_DB, CODE_MISSING_METAFIELDS],
+                )
+                if unblocked > 0:
+                    current_app.logger.info(
+                        f"Parfum update: invalidated {unblocked} blocked orders for perfume_id={perfume_id}"
+                    )
+            except Exception as e:
+                current_app.logger.error(f"Parfum update: safety net invalidation failed: {e}")
         
         sync_msg = ""
         if sinhroniziraj:
@@ -5835,6 +5857,19 @@ def add_serija():
             current_app.logger.error(f"Procurement stock update failed on serija insert: {pe}")
         
         db.commit()
+
+        # Safety net: vnos nove serije lahko odblokira naročila, ki so čakala
+        # na 'expired_serije'. Sprosti njihov pdf_generation_blocked_reason, da
+        # jih naslednji cron retry-a.
+        try:
+            from services.declaration_safety_net import invalidate_blocks_for_parfum, CODE_EXPIRED_SERIJE
+            unblocked = invalidate_blocks_for_parfum(data['parfum_id'], codes=[CODE_EXPIRED_SERIJE])
+            if unblocked > 0:
+                current_app.logger.info(
+                    f"Serija add: invalidated {unblocked} blocked orders for parfum_id={data['parfum_id']}"
+                )
+        except Exception as e:
+            current_app.logger.error(f"Serija add: safety net invalidation failed: {e}")
 
         try:
             _trigger_reconcile_after_series_update()

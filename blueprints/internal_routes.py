@@ -16,6 +16,17 @@ Endpoints:
          naročilo (uporabi mk_sales_order_id cache, če obstaja).
   GET  /api/internal/order-status/<order_number>
        - Diagnostika: lokalna DB stanja + MK + Shopify za eno naročilo.
+  POST /api/internal/safety-net/run?window=14&batch=50
+       - Ročno sprozi safety net job (smart retry za manjkajoče deklaracije).
+  POST /api/internal/safety-net/process/<order_number>
+       - Procesiraj eno naročilo skozi safety net pipeline (test/recovery).
+  POST /api/internal/safety-net/verify
+       - Sprozi Mandrill verify job (preveri status nedavnih safety sends).
+  POST /api/internal/safety-net/invalidate-parfum/<parfum_id>
+       - Smart invalidation: sprosti vsa naročila, blokirana s tem parfumom.
+         Klikni iz UI ko vneses novo serijo / popraviš INCI.
+  GET  /api/internal/safety-net/blocked
+       - Seznam vseh trenutno blokiranih naročil (admin pregled).
 """
 from __future__ import annotations
 
@@ -173,6 +184,135 @@ def order_status(order_number: str):
             if hasattr(v, 'isoformat'):
                 out[k] = v.isoformat()
         return jsonify({'ok': True, 'order': out})
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Declaration safety net endpoints
+# ---------------------------------------------------------------------------
+
+@internal_bp.route('/safety-net/run', methods=['POST', 'GET'])
+def safety_net_run():
+    """Ročno sproži safety net job. Vrne stats."""
+    if not _is_authorized():
+        return _unauthorized()
+    try:
+        window = int(request.args.get('window', '14') or 14)
+    except Exception:
+        window = 14
+    try:
+        batch = int(request.args.get('batch', '50') or 50)
+    except Exception:
+        batch = 50
+
+    from services.declaration_safety_net import run_safety_net_job
+    stats = run_safety_net_job(window_days=window, batch_limit=batch)
+    return jsonify({'ok': True, 'window': window, 'batch': batch, 'stats': stats})
+
+
+@internal_bp.route('/safety-net/process/<path:order_number>', methods=['POST', 'GET'])
+def safety_net_process_one(order_number: str):
+    """Procesiraj eno naročilo skozi safety net pipeline (debug/recovery)."""
+    if not _is_authorized():
+        return _unauthorized()
+    on = (order_number or '').strip()
+    if not on:
+        return jsonify({'ok': False, 'error': 'missing order_number'}), 400
+
+    from services.declaration_safety_net import process_one
+    db = get_db()
+    c = db.cursor()
+    try:
+        c.execute(
+            "SELECT * FROM orders WHERE order_number = %s OR order_number = %s OR order_number = %s LIMIT 1",
+            (on, on.lstrip('#'), f"#{on.lstrip('#')}"),
+        )
+        row = c.fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'order_not_found', 'order_number': on}), 404
+
+        order_data = dict(row) if not isinstance(row, dict) else row
+        result = process_one(order_data, c)
+        db.commit()
+        return jsonify({'ok': True, 'result': result})
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        current_app.logger.error(f"/api/internal/safety-net/process error: {e}", exc_info=True)
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+@internal_bp.route('/safety-net/verify', methods=['POST', 'GET'])
+def safety_net_verify():
+    """Sproži Mandrill verify job."""
+    if not _is_authorized():
+        return _unauthorized()
+    from services.declaration_safety_net import run_mandrill_verify_job
+    stats = run_mandrill_verify_job()
+    return jsonify({'ok': True, 'stats': stats})
+
+
+@internal_bp.route('/safety-net/invalidate-parfum/<int:parfum_id>', methods=['POST', 'GET'])
+def safety_net_invalidate_parfum(parfum_id: int):
+    """Sprosti block flags za vsa naročila, povezana s tem parfumom.
+
+    Klic iz UI ko admin vnese novo serijo ali popravi INCI.
+    Query param 'codes' (csv) za omejitev na specifične kode
+    (npr. ?codes=expired_serije,missing_inci).
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    codes_raw = (request.args.get('codes') or '').strip()
+    codes = [c.strip() for c in codes_raw.split(',') if c.strip()] if codes_raw else None
+
+    from services.declaration_safety_net import invalidate_blocks_for_parfum
+    n = invalidate_blocks_for_parfum(parfum_id, codes=codes)
+    return jsonify({'ok': True, 'parfum_id': parfum_id, 'codes': codes, 'unblocked': n})
+
+
+@internal_bp.route('/safety-net/blocked', methods=['GET'])
+def safety_net_blocked():
+    """Seznam vseh trenutno blokiranih naročil za admin pregled."""
+    if not _is_authorized():
+        return _unauthorized()
+    db = get_db()
+    c = db.cursor()
+    try:
+        c.execute(
+            """
+            SELECT order_number, customer_email, customer_name, created_at,
+                   shopify_fulfilled_at, fulfilled_at,
+                   pdf_generation_blocked_reason, pdf_generation_blocked_codes,
+                   pdf_generation_blocked_parfumi, pdf_generation_last_attempt_at,
+                   mandrill_safety_attempted_at, mandrill_safety_status
+            FROM orders
+            WHERE requires_declaration = TRUE
+              AND mk_decl_uploaded_at IS NULL
+              AND pdf_generation_blocked_reason IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 500
+            """
+        )
+        rows = c.fetchall()
+        out = []
+        for r in rows:
+            d = dict(r) if not isinstance(r, dict) else r
+            for k, v in list(d.items()):
+                if hasattr(v, 'isoformat'):
+                    d[k] = v.isoformat()
+            out.append(d)
+        return jsonify({'ok': True, 'count': len(out), 'orders': out})
     finally:
         try:
             c.close()
