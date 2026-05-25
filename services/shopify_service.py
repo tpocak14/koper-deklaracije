@@ -1009,7 +1009,12 @@ def register_webhooks(shop_domain: str | None = None):
         # URL-ji za webhook-e
         base_url = current_app.config.get('WEBHOOK_BASE_URL', 'https://deklaracije.eu')
         
-        # Seznam webhook-ov, ki jih želimo registrirati
+        # Seznam webhook-ov, ki jih želimo registrirati.
+        #
+        # POMEMBNO: `orders/fulfilled` je pri sodobnih Shopify trgovinah večinoma
+        # tih — Shopify v praksi pošilja `fulfillments/create` (in update). Brez
+        # naročnine na fulfillments/* topica naša DB ne dobi `fulfilled_at`,
+        # zato 21:00 batch in MK upload preskočita naročilo.
         webhooks_to_register = [
             {
                 'topic': 'orders/create',
@@ -1018,6 +1023,16 @@ def register_webhooks(shop_domain: str | None = None):
             },
             {
                 'topic': 'orders/fulfilled',
+                'address': f"{base_url}/webhook/order-fulfilled",
+                'format': 'json'
+            },
+            {
+                'topic': 'fulfillments/create',
+                'address': f"{base_url}/webhook/order-fulfilled",
+                'format': 'json'
+            },
+            {
+                'topic': 'fulfillments/update',
                 'address': f"{base_url}/webhook/order-fulfilled",
                 'format': 'json'
             },

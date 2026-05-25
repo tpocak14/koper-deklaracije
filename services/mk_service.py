@@ -1064,20 +1064,43 @@ def mk_attach_declaration_for_order(
     shopify_order_id: Optional[str] = None,
     mk_bill_id: Optional[str] = None,
     mk_bill_type: Optional[str] = None,
+    mk_sales_order_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Attach declaration PDF to MK document for given order."""
+    """Attach declaration PDF to MK document for given order.
+
+    Vrstni red iskanja MK target dokumenta:
+      1) `mk_sales_order_id` (najnovejši, najhitrejši — Next.js cache iz cron+webhook).
+         MK support: prilogo nalagamo na `sales_order`, ne na `sales_bill_*`.
+      2) `mk_bill_id` + `mk_bill_type` iz lokalne DB.
+      3) `mk_bills` cache tabela.
+      4) Drag MK search (mk_find_bill_*, mk_find_sales_order_by_title) — počasno.
+    """
     order_ref = str(order_number or "").strip()
     order_ref_clean = order_ref.lstrip("#")
     result = {"success": False, "mk_id": None, "doc_type": None, "error": None}
 
-    doc_type = mk_bill_type
-    mk_id = mk_bill_id
-    try:
-        if mk_id and _is_probably_order_number(mk_id, order_ref):
-            mk_id = None
-    except Exception:
-        pass
+    doc_type: Optional[str] = None
+    mk_id: Optional[str] = None
 
+    # 1) Next.js cache: mk_sales_order_id (priporočena pot per MK support).
+    if mk_sales_order_id:
+        sid = str(mk_sales_order_id).strip()
+        if sid and sid.lower() not in ('null', 'none'):
+            mk_id = sid
+            doc_type = 'sales_order'
+
+    # 2) Lokalno polje mk_bill_id (starejši mehanizem).
+    if not mk_id:
+        doc_type = mk_bill_type
+        mk_id = mk_bill_id
+        try:
+            if mk_id and _is_probably_order_number(mk_id, order_ref):
+                mk_id = None
+                doc_type = None
+        except Exception:
+            pass
+
+    # 3) Cache mk_bills tabela.
     if not mk_id or not doc_type:
         db_hit = mk_find_bill_in_db(order_ref)
         if not db_hit and order_ref_clean:

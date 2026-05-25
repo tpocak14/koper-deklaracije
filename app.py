@@ -48,12 +48,14 @@ def create_app():
     from blueprints.api_routes import api_bp
     from blueprints.stats_routes import stats_bp
     from blueprints.auth_routes import auth_bp
+    from blueprints.internal_routes import internal_bp
 
     app.register_blueprint(main_bp)
     app.register_blueprint(webhook_bp)
     app.register_blueprint(api_bp)
     app.register_blueprint(stats_bp)
     app.register_blueprint(auth_bp)
+    app.register_blueprint(internal_bp)
     
     # 6. Naredi funkcije za preverjanje dovoljenj globalno dostopne
     from blueprints.auth_routes import has_permission, require_permission

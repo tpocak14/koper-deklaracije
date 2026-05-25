@@ -370,7 +370,7 @@ def process_fulfilled_orders_daily(window_days: int = 1) -> None:
         try:
             cursor.execute(
                 """
-                SELECT order_number, shopify_order_id, mk_bill_id, mk_bill_type
+                SELECT order_number, shopify_order_id, mk_bill_id, mk_bill_type, mk_sales_order_id
                 FROM orders
                 WHERE (fulfilled_at IS NOT NULL OR shopify_fulfilled_at IS NOT NULL)
                   AND COALESCE(fulfilled_at, shopify_fulfilled_at) BETWEEN %s AND %s
@@ -393,6 +393,7 @@ def process_fulfilled_orders_daily(window_days: int = 1) -> None:
                             shopify_order_id=(r.get('shopify_order_id') if isinstance(r, dict) else None),
                             mk_bill_id=(r.get('mk_bill_id') if isinstance(r, dict) else None),
                             mk_bill_type=(r.get('mk_bill_type') if isinstance(r, dict) else None),
+                            mk_sales_order_id=(r.get('mk_sales_order_id') if isinstance(r, dict) else None),
                         )
                         if attach_res.get("success"):
                             cursor.execute(
@@ -574,6 +575,138 @@ def process_fulfilled_orders_daily(window_days: int = 1) -> None:
         cursor.close()
 
 
+def _sync_fulfilled_at_from_shopify(cursor, db, order_row: dict) -> bool:
+    """Za posamezno naročilo iz lokalne DB preveri Shopify fulfillments REST.
+
+    Če Shopify pravi, da ima naročilo aktivni fulfillment (status=success ali open),
+    posodobi lokalna polja `fulfilled_at`, `shopify_fulfilled_at`, `shopify_fulfillment_id`
+    in tracking polja. Vrne True, če je posodobil DB.
+
+    Klicalec mora poskrbeti za commit (lahko skupinsko).
+    """
+    try:
+        shopify_order_id = order_row.get('shopify_order_id') if isinstance(order_row, dict) else None
+        if not shopify_order_id:
+            return False
+        shop_domain = order_row.get('shopify_store_domain') if isinstance(order_row, dict) else None
+        from services.shopify_service import get_order_fulfillment_details
+        details = get_order_fulfillment_details(shopify_order_id, shop_domain=shop_domain)
+        if not details:
+            return False
+        # `get_order_fulfillment_details` vrne prvi (najnovejši) aktivni fulfillment kot dict.
+        status = (details.get('status') or '').strip().lower()
+        shipment_status = (details.get('shipment_status') or '').strip().lower()
+        if status not in ('success', 'open'):
+            return False
+        created_at = details.get('created_at')
+        fulfillment_id = details.get('id')
+        tracking_no = (
+            details.get('tracking_number')
+            or (details.get('tracking_numbers') or [None])[0]
+        )
+        tracking_company = details.get('tracking_company')
+        tracking_url = (
+            details.get('tracking_url')
+            or (details.get('tracking_urls') or [None])[0]
+        )
+
+        cursor.execute(
+            """
+            UPDATE orders
+            SET fulfilled_at = COALESCE(fulfilled_at, NOW()),
+                shopify_fulfilled_at = COALESCE(shopify_fulfilled_at, %s),
+                shopify_fulfillment_id = COALESCE(shopify_fulfillment_id, %s),
+                tracking_number = COALESCE(tracking_number, %s),
+                tracking_company = COALESCE(tracking_company, %s),
+                tracking_url = COALESCE(tracking_url, %s)
+            WHERE shopify_order_id = %s
+            """,
+            (
+                created_at,
+                str(fulfillment_id) if fulfillment_id else None,
+                tracking_no,
+                tracking_company,
+                tracking_url,
+                str(shopify_order_id),
+            ),
+        )
+
+        # Bonus: če je Shopify že rekel "delivered", poskusi tudi delivered_at.
+        if shipment_status == 'delivered':
+            cursor.execute(
+                """
+                UPDATE orders
+                SET delivered_at = COALESCE(delivered_at, NOW()),
+                    delivered_source = COALESCE(delivered_source, 'shopify_pull')
+                WHERE shopify_order_id = %s
+                """,
+                (str(shopify_order_id),),
+            )
+        return True
+    except Exception as e:
+        try:
+            current_app.logger.warning(
+                f"BACKGROUND: shopify fulfillment sync error for "
+                f"{order_row.get('order_number') if isinstance(order_row, dict) else order_row}: {e}"
+            )
+        except Exception:
+            pass
+        return False
+
+
+def backfill_fulfillment_from_shopify(*, days: int = 14, limit: int = 300) -> dict:
+    """Backfill orders with NULL fulfilled_at by pulling Shopify fulfillment status.
+
+    Targets all orders in the last `days` where lokalni fulfilled_at IS NULL,
+    even if status is `pripravljeno_za_posiljanje` or unset. Po backfillu jih
+    bo hourly reconcile in 21:00 batch normalno procesiral (PDF + MK upload).
+    """
+    db = get_db()
+    cursor = db.cursor()
+    updated = 0
+    checked = 0
+    failed: list[dict] = []
+    try:
+        db.rollback()
+        cursor.execute(
+            """
+            SELECT order_number, shopify_order_id, shopify_store_domain, status
+            FROM orders
+            WHERE fulfilled_at IS NULL
+              AND shopify_fulfilled_at IS NULL
+              AND shopify_order_id IS NOT NULL
+              AND created_at > NOW() - (%s * INTERVAL '1 day')
+            ORDER BY created_at DESC
+            LIMIT %s
+            """,
+            (int(days), int(limit)),
+        )
+        rows = cursor.fetchall() or []
+        for r in rows:
+            checked += 1
+            try:
+                if _sync_fulfilled_at_from_shopify(cursor, db, r):
+                    updated += 1
+                    db.commit()
+                else:
+                    # Ne commitamo no-op, ampak ne podaljšamo trans
+                    db.rollback()
+            except Exception as e:
+                db.rollback()
+                failed.append({
+                    'order_number': r.get('order_number') if isinstance(r, dict) else None,
+                    'reason': str(e),
+                })
+        return {"checked": checked, "updated": updated, "failed_count": len(failed), "failed": failed[:20]}
+    except Exception as e:
+        db.rollback()
+        current_app.logger.error(f"BACKGROUND: backfill fulfillment error: {e}")
+        traceback.print_exc()
+        return {"checked": checked, "updated": updated, "error": str(e)}
+    finally:
+        cursor.close()
+
+
 def reconcile_missing_declarations(hours_back: int = 72, limit: int = 500) -> dict:
     """Hourly reconciliation: ensure fulfilled orders have PDF and MK attachment.
 
@@ -587,6 +720,47 @@ def reconcile_missing_declarations(hours_back: int = 72, limit: int = 500) -> di
     checked_missing = 0
     try:
         db.rollback()
+
+        # Phase 0: defensivni Shopify fulfillment sync.
+        # Tukaj ulovimo naročila, ki so v Shopify-u fulfilled, ampak v naši
+        # DB še nimajo `fulfilled_at` (npr. zaradi izgubljenega webhooka).
+        # Brez tega bi 21:00 batch in spodnja faza Phase 1 takšna naročila
+        # še naprej preskakovala in stranke ne bi prejele deklaracije.
+        try:
+            cursor.execute(
+                """
+                SELECT order_number, shopify_order_id, shopify_store_domain
+                FROM orders
+                WHERE fulfilled_at IS NULL
+                  AND shopify_fulfilled_at IS NULL
+                  AND shopify_order_id IS NOT NULL
+                  AND created_at > NOW() - (%s * INTERVAL '1 hour')
+                ORDER BY created_at DESC
+                LIMIT 30
+                """,
+                (max(int(hours_back), 24),),
+            )
+            unfulfilled_local = cursor.fetchall() or []
+            synced_via_pull = 0
+            for r in unfulfilled_local:
+                try:
+                    if _sync_fulfilled_at_from_shopify(cursor, db, r):
+                        synced_via_pull += 1
+                        db.commit()
+                    else:
+                        db.rollback()
+                except Exception as e:
+                    db.rollback()
+                    current_app.logger.warning(
+                        f"BACKGROUND: pull fulfillment failed for {r.get('order_number') if isinstance(r, dict) else r}: {e}"
+                    )
+            if synced_via_pull:
+                current_app.logger.info(
+                    f"BACKGROUND: reconcile pulled {synced_via_pull} missing fulfillments from Shopify"
+                )
+        except Exception as e:
+            current_app.logger.warning(f"BACKGROUND: defensive Shopify pull phase error: {e}")
+
         cursor.execute(
             """
             SELECT *
@@ -645,6 +819,7 @@ def reconcile_missing_declarations(hours_back: int = 72, limit: int = 500) -> di
                         shopify_order_id=order_data.get('shopify_order_id'),
                         mk_bill_id=order_data.get('mk_bill_id'),
                         mk_bill_type=order_data.get('mk_bill_type'),
+                        mk_sales_order_id=order_data.get('mk_sales_order_id'),
                     )
                     if attach_res.get("success"):
                         cursor.execute(
@@ -731,6 +906,7 @@ def reconcile_missing_declarations(hours_back: int = 72, limit: int = 500) -> di
                         shopify_order_id=refreshed.get('shopify_order_id'),
                         mk_bill_id=refreshed.get('mk_bill_id'),
                         mk_bill_type=refreshed.get('mk_bill_type'),
+                        mk_sales_order_id=refreshed.get('mk_sales_order_id'),
                     )
                     if attach_res.get("success"):
                         cursor.execute(

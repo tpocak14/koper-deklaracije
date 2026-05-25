@@ -837,6 +837,114 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                 except Exception as e:
                     current_app.logger.error(f"Napaka v notranji BG obdelavi fulfilled webhooka: {e}")
                     traceback.print_exc()
+            elif topic in ('fulfillments/create', 'fulfillments/update'):
+                # Modern Shopify topic, ki nadomešča stari `orders/fulfilled`.
+                # Payload je en fulfillment record:
+                #   { id, order_id, status, created_at, updated_at,
+                #     tracking_number, tracking_company, shipment_status, ... }
+                #
+                # Posodobimo samo fulfilled_at/shopify_fulfilled_at na orders;
+                # PDF + MK upload prevzame 21:00 batch (ali hourly reconcile).
+                # Tako tudi ne podvajamo logike z `orders/fulfilled` blokom in
+                # se izognemo race-conditionom (oba topica lahko prispeta).
+                current_app.logger.info(f"=== OBDELAVA {topic.upper()} WEBHOOK (BG) ===")
+                if not isinstance(payload, dict):
+                    pass
+                else:
+                    order_id = payload.get('order_id') or payload.get('order', {}).get('id') if isinstance(payload.get('order'), dict) else payload.get('order_id')
+                    if not order_id:
+                        # Fallback: nekateri payload-i imajo 'order_id' v vgnezdeni strukturi
+                        for k in ('order_id', 'orderId'):
+                            v = payload.get(k)
+                            if v:
+                                order_id = v
+                                break
+                    fulfillment_status = (payload.get('status') or '').strip().lower()
+                    shipment_status = (payload.get('shipment_status') or '').strip().lower()
+                    created_at = payload.get('created_at')
+                    fulfillment_id = payload.get('id')
+                    tracking_no = (
+                        payload.get('tracking_number')
+                        or (payload.get('tracking_numbers') or [None])[0]
+                    )
+                    tracking_company = payload.get('tracking_company')
+                    tracking_url = (
+                        payload.get('tracking_url')
+                        or (payload.get('tracking_urls') or [None])[0]
+                    )
+
+                    if order_id:
+                        try:
+                            if shop_domain:
+                                cursor.execute(
+                                    "UPDATE orders SET shopify_store_domain = %s WHERE shopify_order_id = %s AND shopify_store_domain IS NULL",
+                                    (shop_domain, str(order_id)),
+                                )
+
+                            # fulfilled_at označimo, samo če je status 'success' (Shopify aktivni fulfillment)
+                            # in lokalni fulfilled_at je še prazen — da ne overwrite-amo ročno vnesene vrednosti.
+                            if fulfillment_status in ('success', 'open'):
+                                cursor.execute(
+                                    """
+                                    UPDATE orders
+                                    SET fulfilled_at = COALESCE(fulfilled_at, NOW()),
+                                        shopify_fulfilled_at = COALESCE(shopify_fulfilled_at, %s),
+                                        shopify_fulfillment_id = COALESCE(shopify_fulfillment_id, %s),
+                                        tracking_number = COALESCE(tracking_number, %s),
+                                        tracking_company = COALESCE(tracking_company, %s),
+                                        tracking_url = COALESCE(tracking_url, %s)
+                                    WHERE shopify_order_id = %s
+                                      AND (shopify_store_domain = %s OR shopify_store_domain IS NULL)
+                                    """,
+                                    (
+                                        created_at,
+                                        str(fulfillment_id) if fulfillment_id else None,
+                                        tracking_no,
+                                        tracking_company,
+                                        tracking_url,
+                                        str(order_id),
+                                        shop_domain,
+                                    ),
+                                )
+                            elif fulfillment_status == 'cancelled':
+                                # Če je fulfillment storniran, ne brisemo fulfilled_at avtomatsko
+                                # (admin lahko ima delni fulfillment). Samo logiramo.
+                                current_app.logger.info(
+                                    f"Fulfillment {fulfillment_id} for order {order_id} cancelled — fulfilled_at not cleared."
+                                )
+
+                            # delivered → tudi to označimo, da bomo zdaj lahko sprožili MK pipeline
+                            if shipment_status == 'delivered':
+                                cursor.execute(
+                                    """
+                                    UPDATE orders
+                                    SET delivered_at = COALESCE(delivered_at, NOW()),
+                                        delivered_source = COALESCE(delivered_source, 'shopify_webhook')
+                                    WHERE shopify_order_id = %s
+                                      AND (shopify_store_domain = %s OR shopify_store_domain IS NULL)
+                                    """,
+                                    (str(order_id), shop_domain),
+                                )
+
+                            db.commit()
+                            current_app.logger.info(
+                                f"Webhook {topic} → order_id={order_id}, fulfillment={fulfillment_id}, "
+                                f"status={fulfillment_status}, shipment={shipment_status}, tracking={tracking_no}"
+                            )
+                            global last_fulfilled_order
+                            last_fulfilled_order = {
+                                'order_number': f"shopify:{order_id}",
+                                'timestamp': time.time(),
+                                'via': topic,
+                            }
+                        except Exception as e:
+                            current_app.logger.error(f"Napaka pri obdelavi {topic} za order {order_id}: {e}")
+                            traceback.print_exc()
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+
             elif topic == 'products/update':
                 product_id = str(payload.get('id')) if isinstance(payload, dict) else None
                 if product_id:
