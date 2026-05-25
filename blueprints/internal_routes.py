@@ -216,12 +216,21 @@ def safety_net_run():
 
 @internal_bp.route('/safety-net/process/<path:order_number>', methods=['POST', 'GET'])
 def safety_net_process_one(order_number: str):
-    """Procesiraj eno naročilo skozi safety net pipeline (debug/recovery)."""
+    """Procesiraj eno naročilo skozi safety net pipeline (debug/recovery).
+
+    Ker MK search v najslabšem primeru traja >30s (Heroku H12), to delamo v
+    background-u. Vrnemo 202 takoj. Rezultat lahko spremljaš prek logov
+    ali prek /api/internal/order-status/<order_number>.
+
+    Query param `sync=1` za sinhron klic (ne priporočeno za neznana naročila).
+    """
     if not _is_authorized():
         return _unauthorized()
     on = (order_number or '').strip()
     if not on:
         return jsonify({'ok': False, 'error': 'missing order_number'}), 400
+
+    sync_mode = request.args.get('sync', '').strip() in ('1', 'true', 'yes')
 
     from services.declaration_safety_net import process_one
     db = get_db()
@@ -236,9 +245,50 @@ def safety_net_process_one(order_number: str):
             return jsonify({'ok': False, 'error': 'order_not_found', 'order_number': on}), 404
 
         order_data = dict(row) if not isinstance(row, dict) else row
-        result = process_one(order_data, c)
-        db.commit()
-        return jsonify({'ok': True, 'result': result})
+
+        if sync_mode:
+            # Sinhron pot (lahko timeout-a na Heroku)
+            result = process_one(order_data, c)
+            db.commit()
+            return jsonify({'ok': True, 'mode': 'sync', 'result': result})
+
+        # Background thread: trigger fire-and-forget, return 202 immediately
+        import threading
+        app_obj = current_app._get_current_object()
+
+        def _bg(app_obj, order_data):
+            with app_obj.app_context():
+                try:
+                    from database import get_db as _gdb
+                    inner_db = _gdb()
+                    inner_c = inner_db.cursor()
+                    try:
+                        r = process_one(order_data, inner_c)
+                        inner_db.commit()
+                        app_obj.logger.info(
+                            f"safety-net/process(bg) {order_data.get('order_number')}: {r}"
+                        )
+                    except Exception as e:
+                        inner_db.rollback()
+                        app_obj.logger.error(
+                            f"safety-net/process(bg) {order_data.get('order_number')} error: {e}",
+                            exc_info=True
+                        )
+                    finally:
+                        try:
+                            inner_c.close()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    app_obj.logger.error(f"safety-net/process(bg) outer error: {e}", exc_info=True)
+
+        threading.Thread(target=_bg, args=(app_obj, order_data), daemon=True).start()
+        return jsonify({
+            'ok': True,
+            'mode': 'background',
+            'order_number': order_data.get('order_number'),
+            'message': 'Started in background. Check /api/internal/order-status/<order_number> in 1-2 min.'
+        }), 202
     except Exception as e:
         try:
             db.rollback()
