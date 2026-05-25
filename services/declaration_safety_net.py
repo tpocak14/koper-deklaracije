@@ -290,16 +290,24 @@ def analyze_order(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
 def mk_check_sales_order_status(mk_sales_order_id: Optional[str]) -> Optional[str]:
     """Vrne MK status_desc za sales_order (npr. 'shipped', 'completed').
 
-    Returns None, če ID ni podan ali klic ni uspel.
+    Returns None v vseh napačnih primerih (ID ni podan, MK ne najde dokumenta,
+    omrežna napaka, ...). Razlika med 'unknown' in 'not_a_sales_order' ni
+    relevantna za safety net logiko.
     """
     if not mk_sales_order_id:
         return None
     try:
         from services.mk_service import mk_get_document
-        doc = mk_get_document("sales_order", str(mk_sales_order_id))
+        try:
+            doc = mk_get_document("sales_order", str(mk_sales_order_id))
+        except RuntimeError as e:
+            # MK vrne "Cannot find document type sales_order with id=..." kot
+            # RuntimeError. To pomeni, da ID ni sales_order (npr. je sales_bill).
+            # Brez panic, vrnemo None - upstream se bo odločil.
+            logger.info("mk_get_document(sales_order, %s) miss: %s", mk_sales_order_id, e)
+            return None
         if not doc or not isinstance(doc, dict):
             return None
-        # MK API: status_desc je stable English code (preferred)
         return (
             doc.get("status_desc")
             or doc.get("status_code")
@@ -307,6 +315,45 @@ def mk_check_sales_order_status(mk_sales_order_id: Optional[str]) -> Optional[st
         )
     except Exception as e:
         logger.warning("mk_check_sales_order_status(%s) failed: %s", mk_sales_order_id, e)
+        return None
+
+
+def mk_find_and_cache_sales_order_id(order_number: str, cursor) -> Optional[str]:
+    """Poišči mk_sales_order_id v MK-ju (prek title search) in ga cache-aj.
+
+    To uporabljamo, ko v lokalni DB manjka mk_sales_order_id, ampak ga
+    potrebujemo za safety net (priponka MORA iti na sales_order, da MK
+    sproži Mandrill trigger).
+
+    Returns mk_id ali None.
+    """
+    if not order_number:
+        return None
+    try:
+        from services.mk_service import mk_find_sales_order_by_title
+        clean = str(order_number).lstrip("#").strip()
+        so = mk_find_sales_order_by_title(clean) or mk_find_sales_order_by_title(order_number)
+        if not so:
+            return None
+        mk_id = so.get("mk_id") or so.get("id") or so.get("doc_id")
+        if not mk_id:
+            return None
+        # Cache v lokalnem DB za hitre nadaljnje klice (in Next.js)
+        try:
+            cursor.execute(
+                """
+                UPDATE orders SET
+                    mk_sales_order_id = %s,
+                    mk_last_checked_at = NOW()
+                  WHERE (order_number = %s OR order_number = %s)
+                """,
+                (str(mk_id), order_number, f"#{clean}")
+            )
+        except Exception as e:
+            logger.warning("Failed to cache mk_sales_order_id for %s: %s", order_number, e)
+        return str(mk_id)
+    except Exception as e:
+        logger.warning("mk_find_and_cache_sales_order_id(%s) failed: %s", order_number, e)
         return None
 
 
@@ -656,8 +703,17 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
             (order_number,)
         )
 
-        # 7. Naloži v MK
+        # 7. Pridobi/poišči mk_sales_order_id (priponka MORA iti na sales_order,
+        #    da MK sproži Mandrill trigger; sales_bill ne sprozi tega trigger-ja).
         mk_sales_order_id = order_data.get("mk_sales_order_id")
+        if not mk_sales_order_id:
+            logger.info("Searching mk_sales_order_id for %s (not cached)...", order_number)
+            mk_sales_order_id = mk_find_and_cache_sales_order_id(order_number, cursor)
+            if mk_sales_order_id:
+                logger.info("Found and cached mk_sales_order_id=%s for %s",
+                            mk_sales_order_id, order_number)
+
+        # 8. Naloži v MK na sales_order (key change: MORA biti sales_order)
         attach = mk_attach_declaration_for_order(
             order_number,
             shopify_order_id=order_data.get("shopify_order_id"),
@@ -676,16 +732,30 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
             (order_number,)
         )
 
-        # 8. Preveri MK status — če 'completed', MK ne bo sam sprožil Mandrill
-        mk_status = mk_check_sales_order_status(mk_sales_order_id or attach.get("mk_id"))
+        # Določi, na kateri doc_type je bila priponka dejansko naložena.
+        # Če smo naložili na sales_bill (ker sales_order ni bil najden), MK
+        # Mandrill trigger se NE bo sprožil — gremo direktno na Mandrill API.
+        attached_to_sales_order = (attach.get("doc_type") == "sales_order")
+
+        # 9. Preveri MK status — če 'completed', MK ne bo sam sprožil Mandrill
+        mk_status = mk_check_sales_order_status(mk_sales_order_id)
         is_completed = (mk_status or "").lower() in ("completed", "closed", "zaključeno", "zakljuceno")
 
-        if not is_completed:
+        # KEY LOGIC: Direkten Mandrill send je potreben, če JE bilo eden od:
+        #   - MK status je completed (trigger se ne sprozi)
+        #   - Priponka ni bila naložena na sales_order (npr. samo na sales_bill,
+        #     kjer MK trigger sploh ne pogleda priponk)
+        needs_direct_mandrill = is_completed or not attached_to_sales_order
+
+        if not needs_direct_mandrill:
             result["action"] = "uploaded_mk_only"
-            result["reason"] = f"mk_status={mk_status or 'unknown'} — MK bo sam poslal Mandrill ob completion"
+            result["reason"] = (
+                f"mk_status={mk_status or 'unknown'}, attached_to={attach.get('doc_type')} "
+                f"— MK bo sam poslal Mandrill ob completion"
+            )
             return result
 
-        # 9. MK je že 'completed' — direktni Mandrill send
+        # 10. Direktni Mandrill send (MK že completed ALI priponka ni na sales_order)
         merge_vars = build_mandrill_merge_vars(order_data, analysis["declaration_items"])
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
@@ -736,7 +806,10 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
         )
 
         result["action"] = "uploaded_and_mandrill"
-        result["reason"] = f"mk_status=completed → direct Mandrill send (status={status})"
+        result["reason"] = (
+            f"mk_status={mk_status or 'unknown'}, attached_to={attach.get('doc_type')} "
+            f"→ direct Mandrill send (status={status})"
+        )
         result["mandrill_message_id"] = message_id
         return result
 
