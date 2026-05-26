@@ -2,29 +2,41 @@
 services/declaration_safety_net.py
 ==================================
 
-Customer safety net za PDF deklaracije.
+Pošiljanje PDF deklaracij kupcem (od 2026-05-26 dalje **primarni sender**).
 
-Težava, ki jo rešujemo
-----------------------
-1. Naša aplikacija tvori PDF deklaracijo za vsako Shopify naročilo s parfumi.
-2. PDF naloži na MetaKocka sales_order kot priponko.
-3. MetaKocka avto-pošlje Mandrill template 'deklaracije_si' kupcu s priponko.
+Arhitektura
+-----------
+1. Naša aplikacija tvori PDF deklaracijo za vsako Shopify naročilo s parfumi
+   (ob 21:00 dnevno + ob ročnih izjemnih primerih).
+2. PDF naložimo na MetaKocka sales_order kot prilogo (audit/arhiv).
+3. **Sami pošljemo email kupcu** prek Mandrill API-ja, v jeziku po
+   `country_code` naročila (`pick_declaration_template_name`).
+4. MK Mandrill avto-trigger za 'deklaracije_si' je **izklopljen v MK
+   admin-u** (sicer dvojni mail tujim kupcem).
 
-Lahko se zalomi:
-- PDF tvorba ne uspe (manjkajoča INCI, pretečene serije, manjkajoči Shopify
-  metafields, multi-store mismatch).
-- PDF se ne naloži v MK (race condition, MK API timeout, ...).
-- MK preide v "completed" preden naložimo prilogo → MK Mandrill trigger je
-  enkratni event (vezan na status spremembo), ne sproži se več.
-- Mandrill posledično pošlje napako "Attachment is required, mail skipped".
+Iz MK potrebujemo le signal `status = Zaključeno` (preko polling-a vsakih
+30 min ali webhook-a). Tako vemo, kdaj je naročilo dokončno predano in
+varno za pošiljanje deklaracije.
 
-Posledica: kupec dobi račun, NE dobi deklaracije. To je zakonsko vprašljivo.
+Zakaj ne pošljemo takoj ob fulfillment-u?
+- Zaposleni vnašajo serije/roke do 21:00 — pred tem PDF ne sme biti tvorjen
+- MK status `Zaključeno` je končni indikator dokončanja
+- Če MK označi `Vračilo paketa`, pošiljanje preskočimo
 
-Strategija safety net-a
------------------------
+Robustnost
+----------
+- PDF tvorba lahko spodleti (manjkajoča INCI, pretečene serije, manjkajoči
+  Shopify metafields, multi-store mismatch). Strukturirano blokado označimo
+  in admin obvestimo.
+- Idempotency: pred vsakim send-om preverimo Mandrill log za isti
+  template + order_id; če že obstaja, preskočimo.
+
+Strategija pošiljanja
+---------------------
 Smart retry s strukturirano klasifikacijo blokad:
 
-  1. Identificiramo kandidate (requires_declaration=TRUE in mk_decl_uploaded_at IS NULL).
+  1. Identificiramo kandidate (requires_declaration=TRUE,
+     mk_status = 'Zaključeno', deklaracija še ni poslana).
   2. Za vsakega preverimo, ali se da PDF generirati:
      - če NE → shranimo strukturirane razloge (pdf_generation_blocked_codes),
        povezane parfume (pdf_generation_blocked_parfumi) in opozorimo admina.
@@ -32,13 +44,9 @@ Smart retry s strukturirano klasifikacijo blokad:
        (ko admin vnese serijo, popravi INCI, ali pride product/update webhook
        z novimi metafields, prizadetim naročilom resetiramo blocked flag).
   3. Če PDF gre skozi:
-     a. Naložimo v MK na sales_order (običajna pot, MK avto-pošlje Mandrill).
-     b. Preverimo MK status:
-        - če sales_order še ni 'completed' → MK bo sam sprožil Mandrill
-          ob status spremembi → OK.
-        - če JE 'completed' → MK ne bo več sprožil Mandrill (enkratni event).
-          → Naša app direktno pokliče Mandrill API z istim template-om
-          'deklaracije_si' in PDF prilogo.
+     a. Naložimo v MK na sales_order kot prilogo (audit/arhiv).
+     b. Pošljemo email kupcu preko Mandrill API z lokaliziranim template-om
+        in PDF prilogo.
   4. Za vsak direkten Mandrill send shranimo message_id in čez 15+ minut
      preverimo status (verify job). Pri bounced/rejected pošljemo admin alert.
 
@@ -119,15 +127,15 @@ CODE_LABELS = {
 # ustvari_pdf — uporablja `lang_suffix` po country_code).
 #
 # Trenutno na Mandrillu obstajajo: deklaracije_si, deklaracije_en,
-# deklaracije_de, deklaracije_hr. Za HU in IT za enkrat fallback na EN.
+# deklaracije_de, deklaracije_hr, deklaracije_hu, deklaracije_it.
 #
-# OPOZORILO: MK Order Management ima trenutno svoj Mandrill trigger trdo
-# nastavljen na `deklaracije_si` (vidno iz "Naslov predloge: deklaracije_si"
-# v MK error logu). To pomeni, da MK vsem strankam pošlje SI mail, ne glede
-# na državo. Naš safety net pošilja v pravem jeziku le, ko *mi* sami
-# kličemo Mandrill API (MK trigger pa ostane SI). Za polno rešitev je
-# potrebno bodisi konfigurirati MK trigger po jeziku, bodisi izklopiti
-# MK trigger in vse pošiljanje opraviti iz naše app.
+# ARHITEKTURNA ODLOČITEV (2026-05-26):
+# Vse pošiljanje deklaracij opravlja **naša aplikacija** (Mandrill API).
+# MetaKocka Order Management služi le kot signal: ko ima naročilo status
+# `Zaključeno`, naš hourly safety-net job pošlje pravi jezikovni Mandrill
+# template. MK-jev avtomatski Mandrill trigger mora biti v MK admin-u
+# **izklopljen** (sicer bi kupci v tujini dobili dvojni mail: SI od MK +
+# pravi jezik od nas).
 
 # Mapping: ISO-3166 country_code → Mandrill template name (publish name).
 # Privzeto za neznane države je `deklaracije_en`.
@@ -136,9 +144,8 @@ DECLARATION_TEMPLATE_BY_COUNTRY: Dict[str, str] = {
     "HR": "deklaracije_hr",
     "DE": "deklaracije_de",
     "AT": "deklaracije_de",
-    # HU + IT template-a še ne obstajata na Mandrillu → fallback EN
-    # (ko bo administrator dodal `deklaracije_hu` in `deklaracije_it`,
-    # dopolni mapo spodaj).
+    "HU": "deklaracije_hu",
+    "IT": "deklaracije_it",
 }
 
 DEFAULT_DECLARATION_TEMPLATE = "deklaracije_en"
