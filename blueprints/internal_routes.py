@@ -398,6 +398,67 @@ def safety_net_blocked():
             pass
 
 
+@internal_bp.route('/mk-raw-search/<path:order_number>', methods=['GET'])
+def mk_raw_search(order_number: str):
+    """Raw MK search za sales_order po title/buyer_order, brez retry storm-a.
+
+    Vrne SUROVE rezultate iz MK /search endpoint-a (max 20 zapisov),
+    BREZ klicanja mk_get_document() za vsak row. To je hitro (1-3s) in
+    nam pove, ali MK sploh ima sales_order za to naročilo.
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    on = (order_number or '').strip().lstrip('#')
+    if not on:
+        return jsonify({'ok': False, 'error': 'missing order_number'}), 400
+
+    import requests
+    from services.mk_service import _mk_base, _mk_company_id, _mk_secret_key
+    base = _mk_base(); company_id = _mk_company_id(); secret = _mk_secret_key()
+    if not base or not company_id or not secret:
+        return jsonify({'ok': False, 'error': 'mk_config_missing'}), 500
+
+    out: Dict[str, Any] = {'ok': True, 'order_number': on, 'results': {}}
+    try:
+        for mode in ('title', 'buyer_order'):
+            payload = {
+                'company_id': str(company_id),
+                'secret_key': str(secret),
+                'doc_type': 'sales_order',
+                mode: on,
+                'offset': 0,
+                'limit': 20,
+            }
+            try:
+                resp = requests.post(f"{base}/search", json=payload, timeout=15)
+                if not resp.ok:
+                    out['results'][mode] = {'http_status': resp.status_code, 'body': resp.text[:300]}
+                    continue
+                data = resp.json()
+                rows = data if isinstance(data, list) else (
+                    data.get('rows') or data.get('result') or data.get('documents') or []
+                )
+                # Vrni samo ključna polja (brez celotnega dokumenta)
+                slim = [
+                    {
+                        'mk_id': r.get('mk_id') or r.get('id') or r.get('doc_id'),
+                        'title': r.get('title'),
+                        'buyer_order': r.get('buyer_order'),
+                        'count_code': r.get('count_code'),
+                        'status_code': r.get('status_code'),
+                        'status_desc': r.get('status_desc'),
+                        'doc_date': r.get('doc_date'),
+                    }
+                    for r in (rows or [])
+                ]
+                out['results'][mode] = {'count': len(slim), 'rows': slim}
+            except Exception as e:
+                out['results'][mode] = {'error': str(e)}
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+
 @internal_bp.route('/mk-status-check/<path:order_number>', methods=['GET', 'POST'])
 def mk_status_check(order_number: str):
     """Diagnostika: za eno naročilo poišči mk_sales_order_id, prikliči MK
