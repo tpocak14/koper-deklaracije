@@ -88,33 +88,22 @@ def create_app():
         scheduler.add_job(process_fulfilled_orders, 'interval', minutes=5)
 
         # Daily declarations batch at 21:00 (Europe/Ljubljana)
-        # Po dogovoru (2026-05-26): NAŠA APP je primary sender deklaracij.
-        # Pipeline ob 21:00:
-        #   1. process_fulfilled_orders_daily(window=2) — PDF + MK upload (audit)
-        #   2. run_safety_net_job(window=7) — Mandrill send za vse še-ne-poslane
-        # MK Mandrill trigger ostane vklopljen kot backup; idempotency check
-        # (mandrill_safety_message_id + Mandrill log search) prepreči duplikate.
+        # Po dogovoru (2026-05-26):
+        #   - 21:00 batch: tvori PDF + naloži v MK na sales_order (audit + MK
+        #     Mandrill trigger ready). Mandrill se NE pošlje takoj, ker naročilo
+        #     trenutno ni "Zaključeno" v MK (paket še ni dostavljen + plačan).
+        #   - Hourly cron declaration_safety_net_job: scan-a nedavna fulfilled
+        #     naročila, preveri MK status, in pošlje Mandrill samo če MK pravi
+        #     "Zaključeno" (= dostavljeno + plačano).
+        #   - MK Mandrill trigger ostane vklopljen kot backup (idempotency
+        #     check v naši app prepreči duplikate).
         def daily_declarations_job():
             with app.app_context():
-                # Step 1: tvorba PDF + MK upload (audit trail v MK)
                 try:
                     from services.background_service import process_fulfilled_orders_daily
                     process_fulfilled_orders_daily(window_days=2)
                 except Exception as e:
-                    app.logger.error(f"Napaka pri dnevnem generiranju deklaracij (PDF/MK): {e}")
-
-                # Step 2: Mandrill send za vse še-ne-poslane v zadnjih 7 dni
-                try:
-                    from services.declaration_safety_net import run_safety_net_job
-                    res = run_safety_net_job(window_days=7, batch_limit=300)
-                    app.logger.info(
-                        "Daily Mandrill batch (21:00): scanned=%d, uploaded_and_mandrill=%d, "
-                        "uploaded_mk_only=%d, blocked=%d, errors=%d",
-                        res['scanned'], res['uploaded_and_mandrill'],
-                        res['uploaded_mk_only'], res['blocked'], res['errors'],
-                    )
-                except Exception as e:
-                    app.logger.error(f"Napaka pri dnevnem Mandrill batch-u: {e}", exc_info=True)
+                    app.logger.error(f"Napaka pri dnevnem generiranju deklaracij: {e}")
 
         try:
             from zoneinfo import ZoneInfo
@@ -169,20 +158,22 @@ def create_app():
 
         scheduler.add_job(retail_delta_job, 'cron', hour=1, minute=30)
 
-        # Declaration safety net (vsako uro): smart retry za manjkajoče deklaracije.
-        # Razlika od declaration_reconcile_job: ta job NE retry-a "blocked" naročil
-        # (manjkajoča INCI/serije/metafields), čaka na invalidation hook. Za
-        # 'completed' MK naročila brez priponke direktno pošlje prek Mandrill API.
+        # Mandrill send job (vsako uro): za vsa fulfilled naročila v zadnjih
+        # 7 dneh preveri MK status. Če je MK status = "Zaključeno" (dostavljeno +
+        # plačano) in mi še nismo poslali Mandrill, pošlje deklaracijo kupcu.
+        # Idempotency: pred sendom preveri Mandrill log po order_id metadata,
+        # da ne dupliciramo z MK Mandrill trigger-jem (ki ostane backup).
         def declaration_safety_net_job():
             with app.app_context():
                 try:
                     from services.declaration_safety_net import run_safety_net_job
-                    window = int(os.environ.get('SAFETY_NET_WINDOW_DAYS', '14') or 14)
-                    batch = int(os.environ.get('SAFETY_NET_BATCH_LIMIT', '50') or 50)
+                    window = int(os.environ.get('SAFETY_NET_WINDOW_DAYS', '7') or 7)
+                    batch = int(os.environ.get('SAFETY_NET_BATCH_LIMIT', '200') or 200)
                     res = run_safety_net_job(window_days=window, batch_limit=batch)
                     app.logger.info(
                         "declaration_safety_net_job done: scanned=%d, blocked=%d, "
-                        "uploaded_mk_only=%d, uploaded_and_mandrill=%d, errors=%d",
+                        "uploaded_mk_only=%d (waiting for MK completed), "
+                        "uploaded_and_mandrill=%d (sent to customer), errors=%d",
                         res['scanned'], res['blocked'], res['uploaded_mk_only'],
                         res['uploaded_and_mandrill'], res['errors'],
                     )
