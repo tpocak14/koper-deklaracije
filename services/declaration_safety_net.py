@@ -1042,6 +1042,13 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
         # tako da sta email body in PDF v istem jeziku.
         result["mandrill_template"] = target_template_name
 
+        # Admin BCC za monitoring: če je nastavljen env var
+        # ADMIN_BCC_DECLARATION_EMAIL (npr. tpocak@gmail.com), Mandrill na ta
+        # naslov pošlje slepo kopijo vsakega send-a. Kupec ne vidi tega naslova
+        # v glavah maila. Za izklop: odstrani env var (ali nastavi prazno).
+        import os as _os
+        bcc_admin = (_os.environ.get("ADMIN_BCC_DECLARATION_EMAIL", "") or "").strip() or None
+
         try:
             mandrill_resp = mandrill_service.send_template(
                 template_name=target_template_name,
@@ -1054,6 +1061,7 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
                 }],
                 tags=["safety-net", "declaration", target_template_name, f"order:{order_number}"],
                 metadata={"order_id": str(order_number), "country": country_code or ""},
+                bcc_address=bcc_admin,
             )
         except Exception as e:
             logger.exception(

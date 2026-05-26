@@ -120,6 +120,7 @@ def send_template(
     subject: Optional[str] = None,
     tags: Optional[List[str]] = None,
     metadata: Optional[Dict[str, str]] = None,
+    bcc_address: Optional[str] = None,
     merge_language: str = "mailchimp",
     track_opens: bool = True,
     track_clicks: bool = True,
@@ -137,6 +138,9 @@ def send_template(
         attachments: seznam PDF prilog [{'filename': str, 'data': bytes}]
         tags: seznam tag-ov za Mandrill filtriranje (npr. ['safety-net', 'SI2377'])
         metadata: poljubne ključ-vrednost metadata (max ~10 ključev)
+        bcc_address: slepa kopija (BCC) na naslov za admin nadzor. Kupec ne
+            vidi tega naslova v glavah maila. Uporablja se za monitoring
+            deklaracij prek `ADMIN_BCC_DECLARATION_EMAIL` env var.
 
     Returns:
         seznam [{'_id': str, 'email': str, 'status': 'sent'|'queued'|'rejected'|'invalid',
@@ -166,6 +170,10 @@ def send_template(
         message["tags"] = list(tags)
     if metadata:
         message["metadata"] = dict(metadata)
+    if bcc_address:
+        # Mandrill BCC: posebno polje, ne v `to` array. Mandrill na ta naslov
+        # pošlje ločen mail, ki ni vidno kupcu (ni v To/Cc glavah).
+        message["bcc_address"] = bcc_address
 
     if attachments:
         message["attachments"] = [
