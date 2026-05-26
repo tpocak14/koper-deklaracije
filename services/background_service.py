@@ -92,8 +92,24 @@ def process_fulfilled_orders_background():
                         continue
                 
                 # 3. Pošlji email (če še ni bil poslan)
-                if not order_data['email_sent_at']:
-                    current_app.logger.info(f"BACKGROUND: Pošiljam declaration email za naročilo {order_number}")
+                #
+                # 2026-05-26: SMTP pošiljanje je v privzetem stanju IZKLOPLJENO.
+                # Pošiljanje deklaracij kupcem opravlja `declaration_safety_net_job`
+                # preko Mandrill API-ja, ko ima naročilo v MK status `Zaključeno`
+                # (v ustreznem jeziku po `country_code`). Ta legacy SMTP pot bi
+                # ustvarila dvojni mail in dodatno onemogočila Mandrill send
+                # zaradi `email_sent_at` markerja.
+                #
+                # Kill-switch override (za izjemne primere):
+                #   DISABLE_SMTP_DECLARATION_EMAIL=0 → omogoči SMTP send (legacy)
+                # Privzeto: izklopljeno (1 = disabled).
+                import os as _os
+                _smtp_disabled = (
+                    (_os.environ.get('DISABLE_SMTP_DECLARATION_EMAIL', '1') or '1')
+                    .strip().lower() not in ('0', 'false', 'no', '')
+                )
+                if not order_data['email_sent_at'] and not _smtp_disabled:
+                    current_app.logger.info(f"BACKGROUND: Pošiljam declaration email (legacy SMTP) za naročilo {order_number}")
                     
                     customer_email = shopify_data.get('email')
                     if not customer_email:
@@ -142,6 +158,11 @@ def process_fulfilled_orders_background():
                     else:
                         current_app.logger.warning(f"BACKGROUND: Declaration email ni poslan za naročilo {order_number}")
                         continue
+                elif _smtp_disabled and not order_data['email_sent_at']:
+                    current_app.logger.debug(
+                        f"BACKGROUND: SMTP send preskočen za {order_number} (DISABLE_SMTP_DECLARATION_EMAIL); "
+                        f"Mandrill safety-net bo poslal ob MK = Zaključeno"
+                    )
                 
                 processed_count += 1
                 current_app.logger.info(f"BACKGROUND: Uspešno procesirano naročilo {order_number}")
