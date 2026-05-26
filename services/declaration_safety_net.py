@@ -109,6 +109,63 @@ CODE_LABELS = {
 }
 
 
+# ============================================================================
+# Lokalizacija Mandrill template-ov
+# ============================================================================
+#
+# Mandrill ima ločene template-e po jeziku (subject + body), ki uporabljajo
+# isti nabor merge_vars. Glede na `country_code` naročila izberemo pravi
+# template. PDF priponka je že tvorjena v ustreznem jeziku (glej pdf_service.
+# ustvari_pdf — uporablja `lang_suffix` po country_code).
+#
+# Trenutno na Mandrillu obstajajo: deklaracije_si, deklaracije_en,
+# deklaracije_de, deklaracije_hr. Za HU in IT za enkrat fallback na EN.
+#
+# OPOZORILO: MK Order Management ima trenutno svoj Mandrill trigger trdo
+# nastavljen na `deklaracije_si` (vidno iz "Naslov predloge: deklaracije_si"
+# v MK error logu). To pomeni, da MK vsem strankam pošlje SI mail, ne glede
+# na državo. Naš safety net pošilja v pravem jeziku le, ko *mi* sami
+# kličemo Mandrill API (MK trigger pa ostane SI). Za polno rešitev je
+# potrebno bodisi konfigurirati MK trigger po jeziku, bodisi izklopiti
+# MK trigger in vse pošiljanje opraviti iz naše app.
+
+# Mapping: ISO-3166 country_code → Mandrill template name (publish name).
+# Privzeto za neznane države je `deklaracije_en`.
+DECLARATION_TEMPLATE_BY_COUNTRY: Dict[str, str] = {
+    "SI": "deklaracije_si",
+    "HR": "deklaracije_hr",
+    "DE": "deklaracije_de",
+    "AT": "deklaracije_de",
+    # HU + IT template-a še ne obstajata na Mandrillu → fallback EN
+    # (ko bo administrator dodal `deklaracije_hu` in `deklaracije_it`,
+    # dopolni mapo spodaj).
+}
+
+DEFAULT_DECLARATION_TEMPLATE = "deklaracije_en"
+
+
+def pick_declaration_template_name(country_code: Optional[str]) -> str:
+    """Izbere Mandrill template name (publish name) za jezik kupca.
+
+    Vrne npr. 'deklaracije_si', 'deklaracije_de', ... Privzeto
+    DEFAULT_DECLARATION_TEMPLATE ('deklaracije_en') če country_code ni
+    znan ali jezikovne predloge ni v `DECLARATION_TEMPLATE_BY_COUNTRY`.
+
+    Args:
+        country_code: ISO-3166 alpha-2 koda iz `orders.country_code`
+            (npr. 'SI', 'DE', 'AT'). Primerja se case-insensitive.
+
+    Returns:
+        Publish name template-a, ki ga sprejme Mandrill API
+        (`messages/send-template.json`).
+    """
+    if not country_code:
+        return DEFAULT_DECLARATION_TEMPLATE
+    return DECLARATION_TEMPLATE_BY_COUNTRY.get(
+        country_code.strip().upper(), DEFAULT_DECLARATION_TEMPLATE
+    )
+
+
 def classify_blockers(missing_strings: List[str]) -> List[str]:
     """Pretvori human-readable missing strings v structured codes."""
     codes: set[str] = set()
@@ -900,7 +957,21 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
 
         # 11. Cross-check: morda je MK že uspešno sprožil mail prej (npr. pred
         #     to napako). Preverimo Mandrill log za zadnjih 14 dni, ali že obstaja
-        #     'Deklaracije...' email za tega kupca.
+        #     deklaracijski email za tega kupca **v pravem jeziku**.
+        #
+        #     POMEMBNO — jezikovna občutljivost:
+        #     MK Order Management ima Mandrill trigger hardkodiran na
+        #     `deklaracije-si`, zato MK vsem strankam (tudi DE/AT/EN/...)
+        #     pošlje SI mail. V tem primeru "deklaracija je bila poslana" je
+        #     resnično le, če je bila poslana v **stranki ustreznem jeziku**.
+        #     Sicer mora naš safety net poslati pravo jezikovno različico
+        #     (rezultat: dva mail-a — eden v SI od MK, drugi v lokalnem
+        #     jeziku od nas; dokler MK trigger ni rekonfiguriran).
+        country_code = (order_data.get("country_code") or "").strip().upper() or None
+        target_template_name = pick_declaration_template_name(country_code)
+        # Mandrill log API uporablja `slug` (dash-separator), naš `name`
+        # uporablja underscore. Pretvori `deklaracije_de` → `deklaracije-de`.
+        target_template_slug = target_template_name.replace("_", "-")
         try:
             recipient_email = order_data.get("customer_email") or order_data.get("email")
             if recipient_email:
@@ -908,7 +979,9 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
                 cutoff_from = (datetime.now() - _td(days=14)).strftime("%Y-%m-%d")
                 cutoff_to = (datetime.now() + _td(days=1)).strftime("%Y-%m-%d")
                 msgs = mandrill_service.messages_search(
-                    query=f"full_email:{recipient_email} AND template:deklaracije-si",
+                    query=(
+                        f"full_email:{recipient_email} AND template:{target_template_slug}"
+                    ),
                     date_from=cutoff_from, date_to=cutoff_to, limit=20,
                 )
                 # Match po order_id metadata (če je) ali po datumu (within 7 days of fulfillment)
@@ -921,8 +994,8 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
                         already_sent = True
                         result["mandrill_message_id"] = m.get("_id")
                         result["reason"] = (
-                            f"Mandrill log že vsebuje deklaracijo: {m.get('_id')} "
-                            f"(state={m.get('state')})"
+                            f"Mandrill log že vsebuje {target_template_slug}: "
+                            f"{m.get('_id')} (state={m.get('state')})"
                         )
                         break
                 if already_sent:
@@ -956,9 +1029,15 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
                                            order_data.get("customer_last_name"))
                           or recipient_email)
 
+        # `target_template_name` in `country_code` sta že določena zgoraj
+        # (uporabljeni za idempotency cross-check). PDF priponka je že
+        # lokalizirana v pdf_service.ustvari_pdf po istem country_code-u,
+        # tako da sta email body in PDF v istem jeziku.
+        result["mandrill_template"] = target_template_name
+
         try:
             mandrill_resp = mandrill_service.send_template(
-                template_name="deklaracije_si",
+                template_name=target_template_name,
                 to=[{"email": recipient_email, "name": recipient_name}],
                 global_merge_vars=merge_vars,
                 attachments=[{
@@ -966,11 +1045,14 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
                     "data": pdf_bytes,
                     "type": "application/pdf",
                 }],
-                tags=["safety-net", "declaration", f"order:{order_number}"],
-                metadata={"order_id": str(order_number)},
+                tags=["safety-net", "declaration", target_template_name, f"order:{order_number}"],
+                metadata={"order_id": str(order_number), "country": country_code or ""},
             )
         except Exception as e:
-            logger.exception("Mandrill send_template failed for %s", order_number)
+            logger.exception(
+                "Mandrill send_template failed for %s (template=%s, country=%s)",
+                order_number, target_template_name, country_code,
+            )
             result["action"] = "error"
             result["reason"] = f"mandrill_send_failed: {e}"
             return result
@@ -1139,15 +1221,16 @@ def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> D
         date_from = (datetime.now() - _td(days=days_back)).strftime("%Y-%m-%d")
         date_to = (datetime.now() + _td(days=1)).strftime("%Y-%m-%d")
 
-        sent_order_ids: set[str] = set()
-        sent_emails_with_ts: List[Tuple[str, int]] = []
+        # Hranimo po-template mape, ker je SAMI SI MK-jev "default" za vse
+        # kupce; kupcu v DE/AT/HR/... velja "že poslano" le, če je bil
+        # poslan ustrezen jezikovni template (`deklaracije-de`, ...).
+        sent_order_ids_by_template: Dict[str, set] = {}
+        sent_emails_ts_by_template: Dict[str, List[Tuple[str, int]]] = {}
 
         try:
-            # Mandrill /messages/search supports tags param directly + date range
             from services import mandrill_service as mc
             # Iteriraj v paginih (Mandrill default limit ~1000)
             for page_start in range(0, 5):  # max 5000 zapisov
-                page_offset = page_start * 1000
                 msgs = mc.messages_search(
                     query=f"sender:orders@amourparfums.com",
                     date_from=date_from, date_to=date_to, limit=1000,
@@ -1155,19 +1238,23 @@ def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> D
                 if not msgs:
                     break
                 for m in msgs:
-                    template = (m.get("template") or "").lower()
+                    template = (m.get("template") or "").lower().strip()
                     subj = (m.get("subject") or "").lower()
                     if "deklaracije" not in template and "deklaracij" not in subj:
                         continue
                     stats["mandrill_msgs_scanned"] += 1
+                    # Normaliziraj template slug (npr. 'deklaracije-si').
+                    tpl_key = template or "deklaracije-unknown"
                     md = m.get("metadata") or {}
                     oid = str(md.get("order_id") or "").lstrip("#").strip()
                     if oid:
-                        sent_order_ids.add(oid)
+                        sent_order_ids_by_template.setdefault(tpl_key, set()).add(oid)
                     email = (m.get("email") or "").lower()
                     ts = m.get("ts") or 0
                     if email and ts:
-                        sent_emails_with_ts.append((email, int(ts)))
+                        sent_emails_ts_by_template.setdefault(tpl_key, []).append(
+                            (email, int(ts))
+                        )
                 if len(msgs) < 1000:
                     break
         except Exception as e:
@@ -1175,13 +1262,15 @@ def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> D
             stats["errors"] += 1
             return stats
 
-        stats["mandrill_known_sent"] = len(sent_order_ids) + len(sent_emails_with_ts)
+        stats["mandrill_known_sent"] = sum(
+            len(s) for s in sent_order_ids_by_template.values()
+        ) + sum(len(s) for s in sent_emails_ts_by_template.values())
 
         # Step 2: DB kandidati
         cursor.execute(
             """
-            SELECT id, order_number, customer_email, fulfilled_at, shopify_fulfilled_at,
-                   mk_decl_uploaded_at
+            SELECT id, order_number, customer_email, country_code, fulfilled_at,
+                   shopify_fulfilled_at, mk_decl_uploaded_at
               FROM orders
              WHERE requires_declaration = TRUE
                AND mk_decl_uploaded_at IS NOT NULL
@@ -1196,23 +1285,28 @@ def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> D
         candidates = cursor.fetchall()
         stats["db_candidates"] = len(candidates)
 
-        # Step 3: identify missing
+        # Step 3: identify missing — match po **jezikovno ustreznem** template-u
         for row in candidates:
             d = dict(row) if not isinstance(row, dict) else row
             order_no_clean = str(d["order_number"] or "").lstrip("#").strip()
             email = (d.get("customer_email") or "").lower()
 
-            # Match by order_id (preferred)
-            if order_no_clean in sent_order_ids:
+            # Target template glede na državo kupca (npr. AT → deklaracije-de).
+            target_tpl_name = pick_declaration_template_name(d.get("country_code"))
+            target_tpl_slug = target_tpl_name.replace("_", "-")
+
+            # Match by order_id v PRAVEM jeziku
+            if order_no_clean in sent_order_ids_by_template.get(target_tpl_slug, set()):
                 continue
 
-            # Fallback: match by email + ts window (within 7d of fulfillment)
+            # Fallback: match po email + ts window (within 7d of fulfillment),
+            # spet le v jezikovno ustreznem template-u
             fulfilled = d.get("shopify_fulfilled_at") or d.get("fulfilled_at")
             matched_by_email = False
             if email and fulfilled:
                 try:
                     f_ts = int(fulfilled.timestamp()) if hasattr(fulfilled, "timestamp") else 0
-                    for (m_email, m_ts) in sent_emails_with_ts:
+                    for (m_email, m_ts) in sent_emails_ts_by_template.get(target_tpl_slug, []):
                         if m_email == email and abs(m_ts - f_ts) < 7 * 86400:
                             matched_by_email = True
                             break
