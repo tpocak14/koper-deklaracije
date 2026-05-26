@@ -173,9 +173,11 @@ def create_app():
                     app.logger.info(
                         "declaration_safety_net_job done: scanned=%d, blocked=%d, "
                         "uploaded_mk_only=%d (waiting for MK completed), "
-                        "uploaded_and_mandrill=%d (sent to customer), errors=%d",
+                        "uploaded_and_mandrill=%d (sent to customer), "
+                        "returned=%d (Vračilo paketa, skipped), errors=%d",
                         res['scanned'], res['blocked'], res['uploaded_mk_only'],
-                        res['uploaded_and_mandrill'], res['errors'],
+                        res['uploaded_and_mandrill'], res.get('returned', 0),
+                        res['errors'],
                     )
                 except Exception as e:
                     app.logger.error(f"declaration_safety_net_job error: {e}", exc_info=True)

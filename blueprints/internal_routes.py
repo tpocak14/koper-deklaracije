@@ -392,3 +392,52 @@ def safety_net_blocked():
             c.close()
         except Exception:
             pass
+
+
+@internal_bp.route('/migrate/025-mk-return-detection', methods=['POST', 'GET'])
+def migrate_025_mk_return_detection():
+    """Ad-hoc migration runner za migracijo 025 (Vračilo paketa detection).
+
+    Idempotent — varno klicati večkrat.
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    db = get_db()
+    c = db.cursor()
+    try:
+        c.execute(
+            """
+            ALTER TABLE orders
+              ADD COLUMN IF NOT EXISTS mk_return_detected_at TIMESTAMPTZ,
+              ADD COLUMN IF NOT EXISTS mk_last_status_desc   TEXT,
+              ADD COLUMN IF NOT EXISTS mk_last_status_code   TEXT,
+              ADD COLUMN IF NOT EXISTS mk_last_status_at     TIMESTAMPTZ;
+            """
+        )
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_orders_mk_returned
+                ON orders (mk_return_detected_at)
+             WHERE mk_return_detected_at IS NOT NULL;
+            """
+        )
+        c.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_orders_mk_last_status_desc
+                ON orders (mk_last_status_desc)
+             WHERE mk_last_status_desc IS NOT NULL;
+            """
+        )
+        db.commit()
+        return jsonify({'ok': True, 'migration': '025_mk_return_detection', 'applied': True})
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass

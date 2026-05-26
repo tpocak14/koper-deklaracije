@@ -290,32 +290,77 @@ def analyze_order(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
 def mk_check_sales_order_status(mk_sales_order_id: Optional[str]) -> Optional[str]:
     """Vrne MK status_desc za sales_order (npr. 'shipped', 'completed').
 
-    Returns None v vseh napačnih primerih (ID ni podan, MK ne najde dokumenta,
-    omrežna napaka, ...). Razlika med 'unknown' in 'not_a_sales_order' ni
-    relevantna za safety net logiko.
+    Backwards-compatible wrapper: za nov code path uporabi
+    mk_check_sales_order_status_full() ki vrne tudi status_code (Slovene
+    human-readable npr. "Vračilo paketa", "Zaključeno").
     """
+    full = mk_check_sales_order_status_full(mk_sales_order_id)
+    return full.get("status_desc") or full.get("status_code") if full else None
+
+
+def mk_check_sales_order_status_full(mk_sales_order_id: Optional[str]) -> Dict[str, Optional[str]]:
+    """Vrne dict z status_desc IN status_code za sales_order.
+
+    Returns:
+        {"status_desc": str|None, "status_code": str|None}
+
+    Status convention v MK:
+      - status_desc = machine readable (en): "completed", "shipped", "returned"
+      - status_code = human readable (sl):  "Zaključeno", "Odpremljeno", "Vračilo paketa"
+    """
+    empty = {"status_desc": None, "status_code": None}
     if not mk_sales_order_id:
-        return None
+        return empty
     try:
         from services.mk_service import mk_get_document
         try:
             doc = mk_get_document("sales_order", str(mk_sales_order_id))
         except RuntimeError as e:
-            # MK vrne "Cannot find document type sales_order with id=..." kot
-            # RuntimeError. To pomeni, da ID ni sales_order (npr. je sales_bill).
-            # Brez panic, vrnemo None - upstream se bo odločil.
             logger.info("mk_get_document(sales_order, %s) miss: %s", mk_sales_order_id, e)
-            return None
+            return empty
         if not doc or not isinstance(doc, dict):
-            return None
-        return (
-            doc.get("status_desc")
-            or doc.get("status_code")
-            or None
-        )
+            return empty
+        return {
+            "status_desc": doc.get("status_desc"),
+            "status_code": doc.get("status_code"),
+        }
     except Exception as e:
-        logger.warning("mk_check_sales_order_status(%s) failed: %s", mk_sales_order_id, e)
-        return None
+        logger.warning("mk_check_sales_order_status_full(%s) failed: %s", mk_sales_order_id, e)
+        return empty
+
+
+def classify_mk_status(status_desc: Optional[str], status_code: Optional[str]) -> str:
+    """Klasificiraj MK status v 4 kategorije za safety net flow.
+
+    Returns:
+        'completed' — naročilo dostavljeno + plačano → pošlji deklaracijo + Shopify Delivered
+        'returned'  — paket se vrača nazaj → STOP, ne pošiljaj, ne markaj Delivered
+        'shipped'   — paket na poti → čakaj (MK bo sam sprožil Mandrill ob completion)
+        'pending'   — pred odpremo (za odpremo, izdaja računa) → čakaj
+        'unknown'   — neznan / MK API ne odgovori
+    """
+    desc = (status_desc or "").strip().lower()
+    code = (status_code or "").strip().lower()
+
+    # Returned: MK status_code je "Vračilo paketa" (slo) ali status_desc "returned"
+    return_keywords = ("vrač", "vrac", "vrnitev", "return")
+    if any(k in desc for k in return_keywords) or any(k in code for k in return_keywords):
+        return "returned"
+
+    # Completed: "Zaključeno" / "completed" / "closed"
+    completed_keywords = ("complet", "closed", "zaključ", "zakljuc", "končan", "koncan")
+    if any(k in desc for k in completed_keywords) or any(k in code for k in completed_keywords):
+        return "completed"
+
+    # Shipped / Odpremljeno / Predano dostavni službi
+    shipped_keywords = ("shipped", "odpremlj", "predano", "dispatched", "delivered")
+    if any(k in desc for k in shipped_keywords) or any(k in code for k in shipped_keywords):
+        return "shipped"
+
+    # Pending: za odpremo, izdaja računa, draft, ...
+    if desc or code:
+        return "pending"
+    return "unknown"
 
 
 def mk_find_and_cache_sales_order_id(order_number: str, cursor) -> Optional[str]:
@@ -602,6 +647,54 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
         result["reason"] = "missing_order_number"
         return result
 
+    # 0. EARLY EXIT: če smo to naročilo že prej zaznali kot "Vračilo paketa",
+    #    sploh ne kličemo MK API, ne tvorimo PDF-ja, ne pošljemo nič.
+    if order_data.get("mk_return_detected_at"):
+        result["action"] = "returned"
+        result["reason"] = "mk_return_detected_at je nastavljen — paket se vrača"
+        return result
+
+    # 0b. EARLY CHECK MK STATUS: če MK kaže "Vračilo paketa", mark + abort.
+    #     Ta klic je dovolj poceni (1-2s) in nam prihrani celotno PDF/upload pot.
+    #     Klic naredimo SAMO če imamo cached mk_sales_order_id; sicer bomo to
+    #     poskusili še kasneje (po analyze_order + mk lookup).
+    mk_sales_order_id_cached = order_data.get("mk_sales_order_id")
+    if mk_sales_order_id_cached:
+        mk_status_full = mk_check_sales_order_status_full(mk_sales_order_id_cached)
+        mk_category = classify_mk_status(
+            mk_status_full.get("status_desc"), mk_status_full.get("status_code")
+        )
+        # Posnemi zadnji znan MK status (za UI / debug)
+        cursor.execute(
+            """
+            UPDATE orders SET
+                mk_last_status_desc = %s,
+                mk_last_status_code = %s,
+                mk_last_status_at   = NOW()
+            WHERE order_number = %s
+            """,
+            (mk_status_full.get("status_desc"), mk_status_full.get("status_code"), order_number)
+        )
+        if mk_category == "returned":
+            cursor.execute(
+                """
+                UPDATE orders SET
+                    mk_return_detected_at = COALESCE(mk_return_detected_at, NOW())
+                WHERE order_number = %s
+                """,
+                (order_number,)
+            )
+            logger.info(
+                "Order %s skipped: MK status='%s/%s' = Vračilo paketa",
+                order_number, mk_status_full.get("status_code"), mk_status_full.get("status_desc"),
+            )
+            result["action"] = "returned"
+            result["reason"] = (
+                f"MK status: {mk_status_full.get('status_code')} "
+                f"({mk_status_full.get('status_desc')}) — paket se vrača, deklaracija se ne pošlje"
+            )
+            return result
+
     # 1. Analiza
     try:
         analysis = analyze_order(order_data, cursor)
@@ -737,21 +830,57 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
         # Mandrill trigger se NE bo sprožil — gremo direktno na Mandrill API.
         attached_to_sales_order = (attach.get("doc_type") == "sales_order")
 
-        # 9. Preveri MK status — če 'completed', MK ne bo sam sprožil Mandrill
-        mk_status = mk_check_sales_order_status(mk_sales_order_id)
-        is_completed = (mk_status or "").lower() in ("completed", "closed", "zaključeno", "zakljuceno")
+        # 9. Preveri MK status z novo klasifikacijo
+        mk_status_full = mk_check_sales_order_status_full(mk_sales_order_id)
+        mk_category = classify_mk_status(
+            mk_status_full.get("status_desc"), mk_status_full.get("status_code")
+        )
 
-        # KEY LOGIC: Direkten Mandrill send je potreben, če JE bilo eden od:
-        #   - MK status je completed (trigger se ne sprozi)
-        #   - Priponka ni bila naložena na sales_order (npr. samo na sales_bill,
-        #     kjer MK trigger sploh ne pogleda priponk)
-        needs_direct_mandrill = is_completed or not attached_to_sales_order
+        # Posnemi zadnji znan MK status
+        cursor.execute(
+            """
+            UPDATE orders SET
+                mk_last_status_desc = %s,
+                mk_last_status_code = %s,
+                mk_last_status_at   = NOW()
+            WHERE order_number = %s
+            """,
+            (mk_status_full.get("status_desc"), mk_status_full.get("status_code"), order_number)
+        )
 
-        if not needs_direct_mandrill:
+        # EDGE CASE: naročilo je med upload-om prešlo v "Vračilo paketa".
+        # Ne pošljemo Mandrill (paket se vrača nazaj).
+        if mk_category == "returned":
+            cursor.execute(
+                """
+                UPDATE orders SET
+                    mk_return_detected_at = COALESCE(mk_return_detected_at, NOW())
+                WHERE order_number = %s
+                """,
+                (order_number,)
+            )
+            result["action"] = "returned"
+            result["reason"] = (
+                f"MK status med upload-om: {mk_status_full.get('status_code')} "
+                f"— paket se vrača, Mandrill se ne pošlje"
+            )
+            return result
+
+        # Direkten Mandrill send je potreben SAMO če JE MK status 'completed'.
+        # (Po dogovoru 2026-05-26: pošljemo deklaracijo SAMO ko je naročilo
+        # zaključeno v MK — tj. dostavljeno + plačano.)
+        # Edge case: če priponka ni bila naložena na sales_order (samo na
+        # sales_bill kjer MK trigger ne deluje), pošljemo direktno tudi takrat,
+        # vendar SAMO če je status completed.
+        is_completed = (mk_category == "completed")
+
+        if not is_completed:
+            # Vse drugo (shipped / pending / unknown) → čakamo
             result["action"] = "uploaded_mk_only"
             result["reason"] = (
-                f"mk_status={mk_status or 'unknown'}, attached_to={attach.get('doc_type')} "
-                f"— MK bo sam poslal Mandrill ob completion"
+                f"mk_status={mk_status_full.get('status_code') or mk_status_full.get('status_desc') or 'unknown'} "
+                f"(category={mk_category}), attached_to={attach.get('doc_type')} "
+                f"— čakamo, da MK preide v 'Zaključeno'"
             )
             return result
 
@@ -911,6 +1040,7 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
         "blocked": 0,
         "uploaded_mk_only": 0,
         "uploaded_and_mandrill": 0,
+        "returned": 0,
         "errors": 0,
         "details": [],
     }
@@ -923,6 +1053,7 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
              WHERE requires_declaration = TRUE
                AND pdf_generation_blocked_reason IS NULL
                AND mandrill_safety_message_id IS NULL
+               AND mk_return_detected_at IS NULL
                AND (shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL)
                AND created_at > NOW() - (%s || ' days')::interval
              ORDER BY shopify_fulfilled_at DESC NULLS LAST, fulfilled_at DESC NULLS LAST, created_at DESC
@@ -946,6 +1077,8 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
                     stats["uploaded_mk_only"] += 1
                 elif action == "uploaded_and_mandrill":
                     stats["uploaded_and_mandrill"] += 1
+                elif action == "returned":
+                    stats["returned"] += 1
                 else:
                     stats["errors"] += 1
                 stats["details"].append(r)
