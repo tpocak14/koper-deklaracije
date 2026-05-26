@@ -88,13 +88,33 @@ def create_app():
         scheduler.add_job(process_fulfilled_orders, 'interval', minutes=5)
 
         # Daily declarations batch at 21:00 (Europe/Ljubljana)
+        # Po dogovoru (2026-05-26): NAŠA APP je primary sender deklaracij.
+        # Pipeline ob 21:00:
+        #   1. process_fulfilled_orders_daily(window=2) — PDF + MK upload (audit)
+        #   2. run_safety_net_job(window=7) — Mandrill send za vse še-ne-poslane
+        # MK Mandrill trigger ostane vklopljen kot backup; idempotency check
+        # (mandrill_safety_message_id + Mandrill log search) prepreči duplikate.
         def daily_declarations_job():
             with app.app_context():
+                # Step 1: tvorba PDF + MK upload (audit trail v MK)
                 try:
                     from services.background_service import process_fulfilled_orders_daily
                     process_fulfilled_orders_daily(window_days=2)
                 except Exception as e:
-                    app.logger.error(f"Napaka pri dnevnem generiranju deklaracij: {e}")
+                    app.logger.error(f"Napaka pri dnevnem generiranju deklaracij (PDF/MK): {e}")
+
+                # Step 2: Mandrill send za vse še-ne-poslane v zadnjih 7 dni
+                try:
+                    from services.declaration_safety_net import run_safety_net_job
+                    res = run_safety_net_job(window_days=7, batch_limit=300)
+                    app.logger.info(
+                        "Daily Mandrill batch (21:00): scanned=%d, uploaded_and_mandrill=%d, "
+                        "uploaded_mk_only=%d, blocked=%d, errors=%d",
+                        res['scanned'], res['uploaded_and_mandrill'],
+                        res['uploaded_mk_only'], res['blocked'], res['errors'],
+                    )
+                except Exception as e:
+                    app.logger.error(f"Napaka pri dnevnem Mandrill batch-u: {e}", exc_info=True)
 
         try:
             from zoneinfo import ZoneInfo
@@ -215,7 +235,7 @@ def create_app():
             scheduler.add_job(mandrill_log_audit_job, 'cron', hour='6,18', minute=0, timezone=lj)
 
         # Daily digest (vsak dan ob 21:30, po dnevnem batchu): povzetek
-        # blokiranih naročil + zadnjih Mandrill safety sends.
+        # poslanih + blokiranih + že-prej-poslanih naročil.
         def safety_net_daily_digest_job():
             with app.app_context():
                 try:
@@ -224,35 +244,63 @@ def create_app():
 
                     db = get_db()
                     cursor = db.cursor()
+
+                    # 1) Blokirana naročila (ne moremo tvoriti PDF zaradi manjkajočih podatkov)
                     cursor.execute(
                         """
-                        SELECT order_number, pdf_generation_blocked_codes AS codes,
-                               pdf_generation_blocked_reason AS reason
+                        SELECT order_number, customer_email AS email,
+                               pdf_generation_blocked_codes AS codes,
+                               pdf_generation_blocked_reason AS reason,
+                               pdf_generation_last_attempt_at AS last_attempt
                           FROM orders
                          WHERE requires_declaration = TRUE
-                           AND mk_decl_uploaded_at IS NULL
+                           AND mandrill_safety_message_id IS NULL
                            AND pdf_generation_blocked_reason IS NOT NULL
+                           AND (shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL)
+                           AND created_at > NOW() - INTERVAL '14 days'
                          ORDER BY created_at DESC
                          LIMIT 200
                         """
                     )
                     blocked = [dict(r) if not isinstance(r, dict) else r for r in cursor.fetchall()]
 
+                    # 2) Mandrill sends zadnjih 24h (vse poslano kupcu)
                     cursor.execute(
                         """
-                        SELECT order_number, mandrill_safety_status AS status, customer_email AS email
+                        SELECT order_number, mandrill_safety_status AS status,
+                               customer_email AS email,
+                               mandrill_safety_attempted_at AS sent_at
                           FROM orders
                          WHERE mandrill_safety_attempted_at > NOW() - INTERVAL '24 hours'
                          ORDER BY mandrill_safety_attempted_at DESC
-                         LIMIT 200
+                         LIMIT 500
                         """
                     )
                     sends = [dict(r) if not isinstance(r, dict) else r for r in cursor.fetchall()]
+
+                    # 3) Skupno število fulfilled naročil danes (denominator za "coverage")
+                    cursor.execute(
+                        """
+                        SELECT COUNT(*) AS n
+                          FROM orders
+                         WHERE requires_declaration = TRUE
+                           AND (shopify_fulfilled_at::date = CURRENT_DATE
+                                OR fulfilled_at::date = CURRENT_DATE)
+                        """
+                    )
+                    total_today_row = cursor.fetchone()
+                    total_today = (total_today_row.get('n') if isinstance(total_today_row, dict)
+                                   else total_today_row[0]) if total_today_row else 0
                     cursor.close()
 
                     poslji_safety_net_daily_digest(
-                        stats={'scanned': len(blocked) + len(sends), 'uploaded_mk_only': 0,
-                               'uploaded_and_mandrill': len(sends), 'errors': 0},
+                        stats={
+                            'scanned': total_today,
+                            'uploaded_mk_only': 0,
+                            'uploaded_and_mandrill': len(sends),
+                            'blocked_total': len(blocked),
+                            'errors': 0,
+                        },
                         blocked_orders=blocked,
                         recent_safety_sends=sends,
                     )

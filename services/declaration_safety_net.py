@@ -880,15 +880,27 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
 # Cron entry points
 # ---------------------------------------------------------------------------
 
-def run_safety_net_job(window_days: int = 14, batch_limit: int = 50) -> Dict[str, Any]:
-    """Glavni cron job: smart retry za naročila brez deklaracije.
+def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str, Any]:
+    """Glavni cron job: za vsa nedavna fulfilled naročila zagotovi, da je
+    deklaracija (a) naložena v MK in (b) poslana kupcu prek Mandrilla.
+
+    Po dogovoru z uporabnikom (2026-05-26): NAŠA APP je primary sender
+    deklaracij. MK Mandrill trigger ostane vklopljen kot backup; idempotency
+    check (mandrill_safety_message_id + Mandrill log search) prepreči duplikate.
 
     Kandidati:
       - requires_declaration = TRUE
-      - mk_decl_uploaded_at IS NULL
-      - pdf_generation_blocked_reason IS NULL  (sveže ali invalidirano)
+      - pdf_generation_blocked_reason IS NULL (sveže ali invalidirano)
+      - shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL
       - created_at > NOW() - window_days
-      - fulfilled (shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL)
+      - Mandrill ŠE NI poslal: mandrill_safety_message_id IS NULL
+        (lahko: mk_decl_uploaded_at NOT NULL ampak mi ne vemo, ali je MK
+         dejansko poslal — process_one preveri Mandrill log za potrditev)
+
+    Args:
+        window_days: koliko dni nazaj scan-amo (default 7; safety net hourly
+            cron uporablja 14 da pokrije tudi zamujena naročila)
+        batch_limit: max naročil v enem zagonu
     """
     db = get_db()
     cursor = db.cursor()
@@ -909,11 +921,11 @@ def run_safety_net_job(window_days: int = 14, batch_limit: int = 50) -> Dict[str
             SELECT *
               FROM orders
              WHERE requires_declaration = TRUE
-               AND mk_decl_uploaded_at IS NULL
                AND pdf_generation_blocked_reason IS NULL
+               AND mandrill_safety_message_id IS NULL
                AND (shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL)
                AND created_at > NOW() - (%s || ' days')::interval
-             ORDER BY created_at DESC
+             ORDER BY shopify_fulfilled_at DESC NULLS LAST, fulfilled_at DESC NULLS LAST, created_at DESC
              LIMIT %s
             """,
             (window_days, batch_limit)
