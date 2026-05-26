@@ -166,8 +166,12 @@ def order_status(order_number: str):
                    fulfilled_at, shopify_fulfilled_at, shopify_fulfillment_id,
                    pdf_generated_at, mk_decl_uploaded_at, mk_decl_upload_checked_at,
                    mk_sales_order_id, mk_status_desc, mk_last_checked_at,
+                   mk_last_status_desc, mk_last_status_code, mk_last_status_at,
+                   mk_return_detected_at,
                    mk_bill_id, mk_bill_type,
                    has_missing_data, missing_data_details,
+                   pdf_generation_blocked_reason, pdf_generation_blocked_codes,
+                   mandrill_safety_message_id, mandrill_safety_status,
                    tracking_number, tracking_company, tracking_url,
                    delivered_at, delivered_source, created_at
             FROM orders
@@ -387,6 +391,107 @@ def safety_net_blocked():
                     d[k] = v.isoformat()
             out.append(d)
         return jsonify({'ok': True, 'count': len(out), 'orders': out})
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+@internal_bp.route('/mk-status-check/<path:order_number>', methods=['GET', 'POST'])
+def mk_status_check(order_number: str):
+    """Diagnostika: za eno naročilo poišči mk_sales_order_id, prikliči MK
+    status in vrni klasifikacijo (completed/returned/shipped/pending/unknown).
+
+    Brez PDF generiranja, brez Mandrill send-a. Samo MK lookup + classify.
+    Sinhrono — odzove se v 5-60s (odvisno od MK search hitrosti).
+
+    Query params:
+      - apply=1   → tudi UPDATE orders SET mk_return_detected_at = NOW()
+                    če je status returned
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    on = (order_number or '').strip()
+    apply_flag = (request.args.get('apply') or '').strip() in ('1', 'true', 'yes')
+
+    from services.declaration_safety_net import (
+        mk_check_sales_order_status_full,
+        classify_mk_status,
+        mk_find_and_cache_sales_order_id,
+    )
+
+    db = get_db()
+    c = db.cursor()
+    try:
+        c.execute(
+            "SELECT order_number, mk_sales_order_id FROM orders "
+            "WHERE order_number = %s OR order_number = %s OR order_number = %s LIMIT 1",
+            (on, on.lstrip('#'), f"#{on.lstrip('#')}"),
+        )
+        row = c.fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'order_not_found', 'order_number': on}), 404
+
+        row_d = dict(row) if not isinstance(row, dict) else row
+        order_num_db = row_d.get('order_number')
+        mk_id = row_d.get('mk_sales_order_id')
+        found_via = 'cache'
+        if not mk_id:
+            mk_id = mk_find_and_cache_sales_order_id(order_num_db, c)
+            db.commit()
+            found_via = 'drag_search'
+
+        if not mk_id:
+            return jsonify({
+                'ok': True,
+                'order_number': order_num_db,
+                'mk_sales_order_id': None,
+                'error': 'mk_sales_order_id_not_found',
+                'note': 'MK ni našel sales_order za to naročilo (drag search miss)',
+            })
+
+        full = mk_check_sales_order_status_full(mk_id)
+        category = classify_mk_status(full.get('status_desc'), full.get('status_code'))
+
+        # Posnemi MK status v lokalno DB
+        c.execute(
+            """
+            UPDATE orders SET
+                mk_last_status_desc = %s,
+                mk_last_status_code = %s,
+                mk_last_status_at   = NOW()
+            WHERE order_number = %s
+            """,
+            (full.get('status_desc'), full.get('status_code'), order_num_db)
+        )
+
+        applied = False
+        if apply_flag and category == 'returned':
+            c.execute(
+                "UPDATE orders SET mk_return_detected_at = COALESCE(mk_return_detected_at, NOW()) "
+                "WHERE order_number = %s",
+                (order_num_db,)
+            )
+            applied = True
+        db.commit()
+
+        return jsonify({
+            'ok': True,
+            'order_number': order_num_db,
+            'mk_sales_order_id': mk_id,
+            'mk_id_found_via': found_via,
+            'mk_status_desc': full.get('status_desc'),
+            'mk_status_code': full.get('status_code'),
+            'category': category,
+            'applied': applied,
+        })
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         try:
             c.close()
