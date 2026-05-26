@@ -1392,10 +1392,44 @@ def _mk_bool_env(name: str, default: bool = False) -> bool:
         return default
 
 
+def _is_non_transient_mk_error(err_msg: str) -> bool:
+    """Razlikuj med transient (network, 5xx, throttling) in permanent (bad input,
+    not-found, schema) napakami. Permanent napake ne smemo retry-ati, ker bomo
+    samo zapravljali čas (5 attempts × eksponentni backoff = 30+ sekund po nepotrebnem).
+
+    Primeri permanent napak iz MK API:
+      - "Cannot find document type X with id=..." — dokument ne obstaja
+      - "Cannot find document type X with doc_id = null" — manjkajoč input
+      - "doc_id is required" — manjkajoč input
+      - "Invalid doc_type" — schema napaka
+      - "Permission denied" / "Access denied" — auth (404/403)
+    """
+    if not err_msg:
+        return False
+    m = err_msg.lower()
+    non_transient_markers = (
+        "cannot find document",
+        "document not found",
+        "is required",
+        "= null",
+        "invalid doc_type",
+        "invalid document",
+        "permission denied",
+        "access denied",
+        "http 404",
+        "http 400",
+        "http 401",
+        "http 403",
+    )
+    return any(mk in m for mk in non_transient_markers)
+
+
 def _mk_post_json_with_retry(url: str, payload: Dict[str, Any], *, max_attempts: int = 5, min_backoff: float = 1.0, max_backoff: float = 20.0, timeout: Optional[int] = None) -> Dict[str, Any]:
     """POST JSON with exponential backoff and basic jitter. Raises on final failure.
 
     - Logs concise errors without secrets
+    - Non-transient errors (npr. "Cannot find document type X") so DETECTED in
+      preskoči retry-je — vržemo takoj.
     """
     attempt = 0
     last_err: Optional[Exception] = None
@@ -1434,6 +1468,13 @@ def _mk_post_json_with_retry(url: str, payload: Dict[str, Any], *, max_attempts:
             return dj
         except Exception as e:
             last_err = e
+            # Non-transient napake ne retry-amo — vržemo takoj.
+            err_str = str(e)
+            if _is_non_transient_mk_error(err_str):
+                current_app.logger.info(
+                    f"MK POST {url} non-transient error (skip retry): {err_str[:200]}"
+                )
+                raise
             if attempt >= max_attempts:
                 break
             sleep_s = min(max_backoff, min_backoff * (2 ** (attempt - 1)))

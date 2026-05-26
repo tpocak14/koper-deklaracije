@@ -398,6 +398,191 @@ def safety_net_blocked():
             pass
 
 
+@internal_bp.route('/mk-cache-warmup', methods=['POST', 'GET'])
+def mk_cache_warmup():
+    """Batch populator za mk_sales_order_id + mk_last_status_{desc,code}.
+
+    Strategy:
+      1. Query MK /search z result_type=doc za sales_order, paginating od najnovejših
+      2. Vsak row ima v sebi celoten dokument (mk_id, title, buyer_order,
+         status_code, status_desc, ...) — ni potrebe po per-row get_document.
+      3. Za vsak dokument matchaj proti našemu orders.order_number in cache-aj.
+      4. Hkrati zaznaj returned in nastavi mk_return_detected_at.
+
+    Query params:
+      - pages=N        (max pages, default 5 → 500 najnovejših sales_order)
+      - apply_returns  (default 1 → set mk_return_detected_at za returned)
+
+    Returns: stats po naročilih (cached, returned_detected, no_match)
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    try:
+        pages = int(request.args.get('pages', '5') or 5)
+    except Exception:
+        pages = 5
+    apply_returns = (request.args.get('apply_returns', '1') or '1').strip() in ('1', 'true', 'yes')
+
+    import requests
+    from services.mk_service import _mk_base, _mk_company_id, _mk_secret_key
+    from services.declaration_safety_net import classify_mk_status
+
+    base = _mk_base(); company_id = _mk_company_id(); secret = _mk_secret_key()
+    if not base or not company_id or not secret:
+        return jsonify({'ok': False, 'error': 'mk_config_missing'}), 500
+
+    db = get_db()
+    c = db.cursor()
+    stats: Dict[str, Any] = {
+        'pages_fetched': 0,
+        'docs_seen': 0,
+        'orders_cached': 0,
+        'orders_already_cached': 0,
+        'returned_detected': 0,
+        'completed_seen': 0,
+        'shipped_seen': 0,
+        'no_local_match': 0,
+        'errors': [],
+    }
+
+    try:
+        # Preberemo skupno število, da scan-amo OD KONCA (= najnovejša)
+        head_payload = {
+            'company_id': str(company_id),
+            'secret_key': str(secret),
+            'doc_type': 'sales_order',
+            'offset': 0,
+            'limit': 1,
+        }
+        try:
+            r = requests.post(f"{base}/search", json=head_payload, timeout=20)
+            r.raise_for_status()
+            head = r.json() if isinstance(r.json(), dict) else {}
+            total = int(head.get('result_all_records') or 0)
+        except Exception as e:
+            return jsonify({'ok': False, 'error': f'mk_head_failed: {e}'}), 500
+
+        if not total:
+            return jsonify({'ok': True, 'stats': stats, 'note': 'MK reported 0 sales_orders'})
+
+        page_size = 100
+        for page in range(pages):
+            offset = max(0, total - page_size * (page + 1))
+            limit = min(page_size, total - offset)
+            if limit <= 0:
+                break
+            payload = {
+                'company_id': str(company_id),
+                'secret_key': str(secret),
+                'doc_type': 'sales_order',
+                'result_type': 'doc',  # vrni cele dokumente, ne samo mk_id-jev
+                'offset': offset,
+                'limit': limit,
+            }
+            try:
+                resp = requests.post(f"{base}/search", json=payload, timeout=45)
+                if not resp.ok:
+                    stats['errors'].append(f"page={page} HTTP {resp.status_code}")
+                    break
+                data = resp.json()
+                rows = data if isinstance(data, list) else (
+                    data.get('rows') or data.get('result') or data.get('documents') or []
+                )
+            except Exception as e:
+                stats['errors'].append(f"page={page} fetch_error: {e}")
+                break
+
+            stats['pages_fetched'] += 1
+            for doc in rows or []:
+                if not isinstance(doc, dict):
+                    continue
+                stats['docs_seen'] += 1
+                mk_id = doc.get('mk_id') or doc.get('id') or doc.get('doc_id')
+                if not mk_id:
+                    continue
+                title = (doc.get('title') or '').strip()
+                buyer = (doc.get('buyer_order') or '').strip()
+                status_desc = doc.get('status_desc') or None
+                status_code = doc.get('status_code') or None
+                category = classify_mk_status(status_desc, status_code)
+
+                if category == 'completed':
+                    stats['completed_seen'] += 1
+                elif category == 'shipped':
+                    stats['shipped_seen'] += 1
+
+                # Najdi local order po title ALI buyer_order (z/brez #)
+                candidates = []
+                for ref in (title, buyer):
+                    if not ref:
+                        continue
+                    clean = ref.lstrip('#').strip()
+                    if not clean:
+                        continue
+                    candidates.append(clean)
+                    candidates.append(f"#{clean}")
+
+                if not candidates:
+                    continue
+
+                # SELECT prvi match
+                placeholders = ','.join(['%s'] * len(candidates))
+                c.execute(
+                    f"SELECT order_number, mk_sales_order_id, mk_return_detected_at "
+                    f"FROM orders WHERE order_number IN ({placeholders}) LIMIT 1",
+                    tuple(candidates),
+                )
+                row = c.fetchone()
+                if not row:
+                    stats['no_local_match'] += 1
+                    continue
+
+                row_d = dict(row) if not isinstance(row, dict) else row
+                order_num_local = row_d.get('order_number')
+                already_cached = bool(row_d.get('mk_sales_order_id'))
+
+                # UPDATE cache + last status
+                c.execute(
+                    """
+                    UPDATE orders SET
+                        mk_sales_order_id   = COALESCE(mk_sales_order_id, %s),
+                        mk_last_status_desc = %s,
+                        mk_last_status_code = %s,
+                        mk_last_status_at   = NOW(),
+                        mk_last_checked_at  = NOW()
+                    WHERE order_number = %s
+                    """,
+                    (str(mk_id), status_desc, status_code, order_num_local),
+                )
+
+                if already_cached:
+                    stats['orders_already_cached'] += 1
+                else:
+                    stats['orders_cached'] += 1
+
+                if category == 'returned' and apply_returns and not row_d.get('mk_return_detected_at'):
+                    c.execute(
+                        "UPDATE orders SET mk_return_detected_at = NOW() WHERE order_number = %s",
+                        (order_num_local,),
+                    )
+                    stats['returned_detected'] += 1
+
+            db.commit()  # commit po vsaki strani
+
+        return jsonify({'ok': True, 'pages_requested': pages, 'stats': stats})
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
 @internal_bp.route('/mk-raw-search/<path:order_number>', methods=['GET'])
 def mk_raw_search(order_number: str):
     """Raw MK search za sales_order po title/buyer_order, brez retry storm-a.
