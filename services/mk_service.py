@@ -611,7 +611,12 @@ def mk_get_document(doc_type: str, doc_id: str, extra: Optional[Dict[str, Any]] 
     if extra:
         payload.update(extra)
     try:
-        dj = _mk_post_json_with_retry(url, payload, max_attempts=5, min_backoff=1.0, max_backoff=20.0)
+        # READ op (get_document) — manj agresivni retry, ker:
+        #   - če dokumenta NI, MK vrne hitro permanent napako (non-transient detect)
+        #   - če je MK down, raje hitro pademo in skip-amo, kot da blokiramo
+        #     cron jobs za 30s/orderno
+        # Worst-case backoff: 1 + 2 + 4 = 7 s (vs prej 31 s).
+        dj = _mk_post_json_with_retry(url, payload, max_attempts=3, min_backoff=1.0, max_backoff=8.0)
         return dj
     except Exception as e:
         current_app.logger.error(f"MK get_document error: {e}")
@@ -1512,7 +1517,8 @@ def mk_get_document_bill_via_get_document(doc_id: str) -> Optional[Dict[str, Any
         'show_tax_factor': True,
     }
     try:
-        dj = _mk_post_json_with_retry(url, payload, max_attempts=5, min_backoff=1.0, max_backoff=20.0)
+        # READ op — manj agresivni retry (3 attempts, 8s max backoff)
+        dj = _mk_post_json_with_retry(url, payload, max_attempts=3, min_backoff=1.0, max_backoff=8.0)
         return dj
     except Exception as e:
         current_app.logger.error(f"mk_get_document_bill_via_get_document failed for {doc_id}: {e}")
@@ -1559,7 +1565,8 @@ def mk_search_bill_ids(date_from: datetime, date_to: datetime, *, page: int = 1,
         ],
     }
     try:
-        dj = _mk_post_json_with_retry(url, payload_a, max_attempts=5, min_backoff=1.0, max_backoff=20.0)
+        # READ op (bill search) — manj retry-jev
+        dj = _mk_post_json_with_retry(url, payload_a, max_attempts=3, min_backoff=1.0, max_backoff=8.0)
         ids = _collect_ids(dj)
         if ids:
             has_next = bool(dj.get('has_next_page') or (dj.get('next_page') and dj.get('total_pages') and dj.get('next_page') <= dj.get('total_pages')))
@@ -1589,7 +1596,8 @@ def mk_search_bill_ids(date_from: datetime, date_to: datetime, *, page: int = 1,
                 {'type': 'doc_date_to',   'value': date_to.replace(tzinfo=timezone.utc).isoformat()},
             ],
         }
-        dj2 = _mk_post_json_with_retry(url, payload_b, max_attempts=5, min_backoff=1.0, max_backoff=20.0)
+        # READ op — manj retry-jev
+        dj2 = _mk_post_json_with_retry(url, payload_b, max_attempts=3, min_backoff=1.0, max_backoff=8.0)
         ids2 = _collect_ids(dj2)
         # Infer has_next by count
         has_next2 = len(ids2) >= int(page_size)
@@ -4445,7 +4453,8 @@ def search_pos_bills(date_from: str, date_to: str, limit: int = MAX_PAGE_SIZE, o
             ],
         }
         try:
-            dj = _mk_post_json_with_retry(url, payload, max_attempts=5, min_backoff=1.0, max_backoff=20.0)
+            # READ op (search_pos_bills) — manj retry-jev
+            dj = _mk_post_json_with_retry(url, payload, max_attempts=3, min_backoff=1.0, max_backoff=8.0)
         except Exception as e:
             current_app.logger.error(f"search_pos_bills error for {dt} offset={offset}: {e}")
             continue
@@ -4582,7 +4591,8 @@ def fetch_retail_bill(mk_id: str) -> Dict[str, Any]:
     payload['doc_id'] = payload['mk_id']
     dj: Dict[str, Any] = {}
     try:
-        dj = _mk_post_json_with_retry(url, payload, max_attempts=5, min_backoff=1.0, max_backoff=20.0)
+        # READ op (fetch_retail_bill) — manj retry-jev
+        dj = _mk_post_json_with_retry(url, payload, max_attempts=3, min_backoff=1.0, max_backoff=8.0)
     except Exception as e:
         current_app.logger.error(f"fetch_retail_bill error for mk_id={mk_id}: {e}")
         return {}
