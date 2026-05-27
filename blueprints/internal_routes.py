@@ -348,6 +348,55 @@ def safety_net_audit():
     return jsonify({'ok': True, 'stats': stats})
 
 
+@internal_bp.route('/safety-net/backfill-blocked', methods=['POST', 'GET'])
+def safety_net_backfill_blocked():
+    """Ad-hoc backfill prej blokiranih naročil.
+
+    Query params:
+      window_days=30     (koliko dni nazaj scan-amo)
+      batch_limit=200    (max naročil v enem klicu)
+      codes=foo,bar      (csv code-ov; če podan, samo naročila s temi codes)
+      dry_run=1          (samo prešteje kandidate brez procesiranja)
+
+    Primer:
+      GET /api/internal/safety-net/backfill-blocked?dry_run=1
+        → prešteje kandidate
+      POST /api/internal/safety-net/backfill-blocked?window_days=60
+        → dejansko re-procesira do 200 naročil iz zadnjih 60 dni
+
+    Vrne stats: {candidates, scanned, still_blocked, uploaded_mk_only,
+                 uploaded_and_mandrill, errors, details: [...]}.
+    """
+    if not _is_authorized():
+        return _unauthorized()
+
+    try:
+        window_days = int(request.args.get('window_days', '30') or 30)
+    except Exception:
+        window_days = 30
+    try:
+        batch_limit = int(request.args.get('batch_limit', '200') or 200)
+    except Exception:
+        batch_limit = 200
+    codes_raw = (request.args.get('codes') or '').strip()
+    only_codes = (
+        [c.strip() for c in codes_raw.split(',') if c.strip()]
+        if codes_raw else None
+    )
+    dry_run = (request.args.get('dry_run', '') or '').strip().lower() in (
+        '1', 'true', 'yes'
+    )
+
+    from services.declaration_safety_net import run_backfill_blocked_orders_job
+    stats = run_backfill_blocked_orders_job(
+        window_days=window_days,
+        batch_limit=batch_limit,
+        only_with_codes=only_codes,
+        dry_run=dry_run,
+    )
+    return jsonify({'ok': True, 'stats': stats})
+
+
 @internal_bp.route('/safety-net/invalidate-parfum/<int:parfum_id>', methods=['POST', 'GET'])
 def safety_net_invalidate_parfum(parfum_id: int):
     """Sprosti block flags za vsa naročila, povezana s tem parfumom.

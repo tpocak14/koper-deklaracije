@@ -1203,6 +1203,157 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
     return stats
 
 
+def run_backfill_blocked_orders_job(
+    window_days: int = 30,
+    batch_limit: int = 200,
+    only_with_codes: Optional[List[str]] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Ad-hoc backfill: re-procesira naročila, ki so bila prej blokirana
+    zaradi manjkajočih master podatkov (parfumi, line items, ...).
+
+    Tipičen use-case: zaposleni je dodal manjkajoče parfume v bazo, in zdaj
+    želimo re-procesirati naročila, ki so bila pred to izboljšavo blokirana.
+
+    Razlika od `run_safety_net_job`:
+      - safety_net_job exclude-a `pdf_generation_blocked_reason IS NOT NULL`
+        (ker so to po definiciji "ne moremo" orders)
+      - ta backfill IZRECNO loveč te, da preveri, ali je problem rešen
+
+    Args:
+        window_days: koliko dni nazaj iščemo blokirana naročila (default 30)
+        batch_limit: max naročil v enem klicu
+        only_with_codes: če podan, vključi samo naročila, ki imajo
+            VSAJ ENO od teh code-ov v `pdf_generation_blocked_codes`.
+            Primer: ['CODE_PARFUM_MISSING_DATA'] — če smo dodali manjkajoče parfume.
+        dry_run: če True, samo prešteje kandidate brez procesiranja
+
+    Returns:
+        stats dict (scanned, resolved, still_blocked, uploaded_mk_only,
+        uploaded_and_mandrill, errors, details)
+    """
+    db = get_db()
+    cursor = db.cursor()
+
+    stats: Dict[str, Any] = {
+        "dry_run": dry_run,
+        "window_days": window_days,
+        "candidates": 0,
+        "scanned": 0,
+        "still_blocked": 0,
+        "uploaded_mk_only": 0,
+        "uploaded_and_mandrill": 0,
+        "skipped_no_parfumov": 0,
+        "returned": 0,
+        "errors": 0,
+        "details": [],
+    }
+
+    try:
+        # Najdi kandidate
+        query = """
+            SELECT * FROM orders
+            WHERE requires_declaration = TRUE
+              AND pdf_generation_blocked_reason IS NOT NULL
+              AND mandrill_safety_message_id IS NULL
+              AND mk_return_detected_at IS NULL
+              AND (shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL)
+              AND created_at > NOW() - (%s || ' days')::interval
+        """
+        params: List[Any] = [window_days]
+
+        if only_with_codes:
+            # PostgreSQL ARRAY overlap (zahteva, da je en code v intersekciji)
+            query += " AND pdf_generation_blocked_codes && %s::text[]"
+            params.append(only_with_codes)
+
+        query += " ORDER BY created_at ASC LIMIT %s"
+        params.append(batch_limit)
+
+        cursor.execute(query, tuple(params))
+        candidates = cursor.fetchall()
+        stats["candidates"] = len(candidates)
+
+        if dry_run:
+            stats["details"] = [
+                {
+                    "order_number": (dict(r) if not isinstance(r, dict) else r).get("order_number"),
+                    "blocked_codes": (dict(r) if not isinstance(r, dict) else r).get(
+                        "pdf_generation_blocked_codes"
+                    ),
+                    "blocked_reason": (dict(r) if not isinstance(r, dict) else r).get(
+                        "pdf_generation_blocked_reason"
+                    ),
+                }
+                for r in candidates
+            ]
+            return stats
+
+        # Pred re-procesiranjem počistimo blocked_* polja, da process_one
+        # zazna kot "fresh" in poskusi PDF tvoriti.
+        for row in candidates:
+            order_data = dict(row) if not isinstance(row, dict) else row
+            order_number = order_data.get("order_number")
+            stats["scanned"] += 1
+
+            try:
+                # Reset blocked metadata pred poskusom
+                cursor.execute(
+                    """
+                    UPDATE orders SET
+                        pdf_generation_blocked_reason = NULL,
+                        pdf_generation_blocked_codes = NULL,
+                        pdf_generation_blocked_parfumi = NULL
+                    WHERE order_number = %s
+                    """,
+                    (order_number,)
+                )
+                # Process
+                r = process_one(order_data, cursor)
+                action = r.get("action", "error")
+                if action == "blocked":
+                    stats["still_blocked"] += 1
+                elif action == "uploaded_mk_only":
+                    stats["uploaded_mk_only"] += 1
+                elif action == "uploaded_and_mandrill":
+                    stats["uploaded_and_mandrill"] += 1
+                elif action == "skipped":
+                    stats["skipped_no_parfumov"] += 1
+                elif action == "returned":
+                    stats["returned"] += 1
+                else:
+                    stats["errors"] += 1
+                stats["details"].append({
+                    "order_number": order_number,
+                    "action": action,
+                    "reason": r.get("reason", ""),
+                })
+                db.commit()
+            except Exception as e:
+                logger.exception(
+                    "Backfill error on order %s", order_number
+                )
+                stats["errors"] += 1
+                db.rollback()
+                stats["details"].append({
+                    "order_number": order_number,
+                    "action": "error",
+                    "reason": str(e)[:200],
+                })
+
+    except Exception as e:
+        logger.exception("run_backfill_blocked_orders_job failed")
+        db.rollback()
+        stats["errors"] += 1
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+    return stats
+
+
 def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> Dict[str, Any]:
     """Layer 2: Scan Mandrill log za naročila, ki "izgledajo OK" ampak NISO bila poslana.
 
