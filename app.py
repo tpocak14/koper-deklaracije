@@ -305,6 +305,19 @@ def create_app():
 
         scheduler.start()
 
+        # Izpostavi globalno preko app.extensions, da lahko blueprints
+        # programsko dodajajo one-shot opravila namesto threading.Thread.
+        # Heroku dyno cycling lahko killuje proste thread-e mid-execution,
+        # APScheduler-jeve job-e pa scheduler obnovi po reload-u (z misfire
+        # policy `coalesce=True`). Glej services/scheduler_helpers.py.
+        try:
+            app.extensions['apscheduler'] = scheduler
+        except Exception:
+            # app.extensions je dict v Flask-u, ampak za vsak slučaj
+            if not hasattr(app, 'extensions'):
+                app.extensions = {}
+            app.extensions['apscheduler'] = scheduler
+
     return app
 
 # Ustvari instanco aplikacije za Gunicorn/WSGI strežnik

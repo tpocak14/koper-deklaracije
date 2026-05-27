@@ -256,42 +256,49 @@ def safety_net_process_one(order_number: str):
             db.commit()
             return jsonify({'ok': True, 'mode': 'sync', 'result': result})
 
-        # Background thread: trigger fire-and-forget, return 202 immediately
-        import threading
-        app_obj = current_app._get_current_object()
+        # Background: scheduleamo enkratno opravilo v APScheduler.
+        # To je bolj robustno kot threading.Thread na Heroku, ker:
+        #   - APScheduler ima centraliziran error logging in retry
+        #   - z `coalesce=True` se ob restartu dyna job pravilno izvede
+        #   - ne tvegamo, da bi dyno cycling sredi thread-a ubilo upload
+        # Fallback na threading se zgodi avtomatsko, če scheduler ni na voljo.
+        from services.scheduler_helpers import schedule_one_shot
 
-        def _bg(app_obj, order_data):
-            with app_obj.app_context():
+        def _bg_safety_net_process(order_data_inner: dict):
+            from database import get_db as _gdb
+            inner_db = _gdb()
+            inner_c = inner_db.cursor()
+            try:
+                r = process_one(order_data_inner, inner_c)
+                inner_db.commit()
+                current_app.logger.info(
+                    f"safety-net/process(scheduled) {order_data_inner.get('order_number')}: {r}"
+                )
+            except Exception as e:
+                inner_db.rollback()
+                current_app.logger.error(
+                    f"safety-net/process(scheduled) {order_data_inner.get('order_number')} error: {e}",
+                    exc_info=True
+                )
+                raise
+            finally:
                 try:
-                    from database import get_db as _gdb
-                    inner_db = _gdb()
-                    inner_c = inner_db.cursor()
-                    try:
-                        r = process_one(order_data, inner_c)
-                        inner_db.commit()
-                        app_obj.logger.info(
-                            f"safety-net/process(bg) {order_data.get('order_number')}: {r}"
-                        )
-                    except Exception as e:
-                        inner_db.rollback()
-                        app_obj.logger.error(
-                            f"safety-net/process(bg) {order_data.get('order_number')} error: {e}",
-                            exc_info=True
-                        )
-                    finally:
-                        try:
-                            inner_c.close()
-                        except Exception:
-                            pass
-                except Exception as e:
-                    app_obj.logger.error(f"safety-net/process(bg) outer error: {e}", exc_info=True)
+                    inner_c.close()
+                except Exception:
+                    pass
 
-        threading.Thread(target=_bg, args=(app_obj, order_data), daemon=True).start()
+        on_clean = (order_data.get('order_number') or '').lstrip('#').strip()
+        job_id = schedule_one_shot(
+            _bg_safety_net_process,
+            args=(order_data,),
+            job_id=f"safety-net-process:{on_clean}",
+        )
         return jsonify({
             'ok': True,
-            'mode': 'background',
+            'mode': 'scheduled',
+            'job_id': job_id,
             'order_number': order_data.get('order_number'),
-            'message': 'Started in background. Check /api/internal/order-status/<order_number> in 1-2 min.'
+            'message': 'Scheduled via APScheduler. Check /api/internal/order-status/<order_number> in 1-2 min.'
         }), 202
     except Exception as e:
         try:
