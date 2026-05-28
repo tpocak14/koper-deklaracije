@@ -3026,6 +3026,7 @@ let narocilaAbortController = null;
     const syncParfumiModal = document.getElementById('sync-parfumi-modal');
     const syncParfumiStoresEl = document.getElementById('sync-parfumi-stores');
     const syncParfumiDryRunEl = document.getElementById('sync-parfumi-dry-run');
+    const syncParfumiUpdateExistingEl = document.getElementById('sync-parfumi-update-existing');
     const syncParfumiResultEl = document.getElementById('sync-parfumi-result');
     const syncParfumiStartBtn = document.getElementById('sync-parfumi-start');
     const syncParfumiStartLabel = document.getElementById('sync-parfumi-start-label');
@@ -3070,6 +3071,7 @@ let narocilaAbortController = null;
         if (syncParfumiCancelBtn) syncParfumiCancelBtn.disabled = busy;
         if (syncParfumiCloseBtn) syncParfumiCloseBtn.disabled = busy;
         if (syncParfumiDryRunEl) syncParfumiDryRunEl.disabled = busy;
+        if (syncParfumiUpdateExistingEl) syncParfumiUpdateExistingEl.disabled = busy;
         if (syncParfumiStoresEl) {
             syncParfumiStoresEl.querySelectorAll('input[type="radio"]').forEach(r => {
                 r.disabled = busy;
@@ -3219,6 +3221,7 @@ let narocilaAbortController = null;
         }
         setSyncParfumiProgress(false);
         if (syncParfumiDryRunEl) syncParfumiDryRunEl.checked = false;
+        if (syncParfumiUpdateExistingEl) syncParfumiUpdateExistingEl.checked = false;
         if (syncParfumiStartLabel) syncParfumiStartLabel.textContent = 'Sinhroniziraj';
         setSyncParfumiBusy(false);
     }
@@ -3239,12 +3242,15 @@ let narocilaAbortController = null;
             return;
         }
         const dryRun = !!syncParfumiDryRunEl?.checked;
+        const updateExisting = !!syncParfumiUpdateExistingEl?.checked;
         setSyncParfumiBusy(true);
         setSyncParfumiProgress(
             true,
             dryRun
                 ? 'Simuliram sinhronizacijo (dry run)…'
-                : 'Sinhroniziram izdelke iz Shopify-ja… To lahko traja več minut.',
+                : updateExisting
+                    ? 'Sinhroniziram in posodabljam obstoječe… To lahko traja več minut.'
+                    : 'Dodajam nove parfume iz Shopify-ja… To lahko traja več minut.',
         );
         if (syncParfumiResultEl) {
             syncParfumiResultEl.classList.add('hidden');
@@ -3258,6 +3264,7 @@ let narocilaAbortController = null;
                 body: JSON.stringify({
                     shop_domain: syncParfumiSelectedStore,
                     dry_run: dryRun,
+                    update_existing: updateExisting,
                 }),
             });
 

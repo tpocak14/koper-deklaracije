@@ -149,11 +149,13 @@ def sync_parfumi_from_shopify(
     shop_domain: str,
     *,
     dry_run: bool = False,
+    update_existing: bool = False,
 ) -> dict[str, Any]:
     """
     Sinhronizira parfume iz izbrane Shopify trgovine v lokalno bazo.
 
-    Logika je usklajena z app-v2 `syncParfumiFromShopify`.
+    Privzeto samo doda manjkajoče parfume (update_existing=False).
+    Posodabljanje obstoječih je opt-in.
     """
     t0 = time.time()
     normalized = _normalize_shop_domain(shop_domain) or DEFAULT_SYNC_STORE
@@ -186,6 +188,7 @@ def sync_parfumi_from_shopify(
         "skipped_samples": [],
         "duration_ms": 0,
         "dry_run": dry_run,
+        "update_existing": update_existing,
     }
 
     products, fetch_errors = _fetch_products(normalized)
@@ -291,6 +294,19 @@ def sync_parfumi_from_shopify(
                 existing = cursor.fetchone()
 
                 if existing:
+                    if not update_existing:
+                        result["skipped"] += 1
+                        if len(result["skipped_samples"]) < 20:
+                            result["skipped_samples"].append(
+                                {
+                                    "product_id": product.get("product_id"),
+                                    "vendor": vendor,
+                                    "product_no": product_no,
+                                    "reason": "Parfum že obstaja (preskočeno)",
+                                }
+                            )
+                        continue
+
                     updates: list[str] = []
                     params: list[Any] = []
 
@@ -313,7 +329,7 @@ def sync_parfumi_from_shopify(
                         if not dry_run:
                             params.append(parfum_id)
                             cursor.execute(
-                                f"UPDATE parfumi SET {', '.join(updates)} WHERE id = %s",
+                                f"UPDATE parfumi SET {', '.join(updates)}, updated_at = NOW() WHERE id = %s",
                                 params,
                             )
                         result["updated"] += 1

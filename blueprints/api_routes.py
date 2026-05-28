@@ -4699,14 +4699,20 @@ def sync_new_perfumes_endpoint():
     data = request.get_json(silent=True) or {}
     shop_domain = (data.get('shop_domain') or DEFAULT_SYNC_STORE).strip()
     dry_run = bool(data.get('dry_run'))
+    update_existing = bool(data.get('update_existing'))
 
     current_app.logger.info(
-        "Starting perfume sync from Shopify (shop=%s, dry_run=%s)...",
+        "Starting perfume sync from Shopify (shop=%s, dry_run=%s, update_existing=%s)...",
         shop_domain,
         dry_run,
+        update_existing,
     )
 
-    result = sync_parfumi_from_shopify(shop_domain, dry_run=dry_run)
+    result = sync_parfumi_from_shopify(
+        shop_domain,
+        dry_run=dry_run,
+        update_existing=update_existing,
+    )
     if result.get("error") and not result.get("ok"):
         return jsonify({"error": result["error"]}), 400
 
