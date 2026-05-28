@@ -6,7 +6,7 @@ from app import app
 from database import get_db
 from services.email_service import poslji_email_s_pdf
 from services.pdf_service import ustvari_pdf
-from services.mk_service import clear_product_cache, get_bulk_product_details
+from services.shopify_service import clear_product_cache, get_bulk_product_details
 
 ORDER_NUMBER = sys.argv[1] if len(sys.argv) > 1 else "#SI2483"
 # +alias → isti inbox, drugačen To kot BCC naslov
