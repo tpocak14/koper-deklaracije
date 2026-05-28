@@ -90,6 +90,20 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
         from_email = f"{sender_name} <{username}>"
         msg['From'] = from_email
         msg['To'] = recipient_email
+
+        # Admin BCC (SMTP pot): enako kot Mandrill safety net — kupec ne vidi
+        # naslova v glavah. Ne dodajamo pri redirect/test-only/both (tam admin
+        # že dobi kopijo).
+        bcc_admin = os.environ.get("ADMIN_BCC_DECLARATION_EMAIL", "").strip() or None
+        use_admin_bcc = (
+            bcc_admin
+            and not redirect_to
+            and email_mode not in ("both",)
+            and (recipient_email or "").strip().lower() != bcc_admin.lower()
+        )
+        if use_admin_bcc:
+            msg["Bcc"] = bcc_admin
+
         # Določi naslov email-a
         if order_number is None:
             msg['Subject'] = 'Varnostna deklaracija za vaš nakup'
@@ -248,7 +262,8 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
                 'order_number': order_number,
                 'recipient': recipient_email,
                 'mode': email_mode,
-                'admin_copy': bool('admin_recipient' in locals() and admin_recipient)
+                'admin_copy': bool('admin_recipient' in locals() and admin_recipient),
+                'admin_bcc': bcc_admin if use_admin_bcc else None,
             })
         except Exception:
             pass
