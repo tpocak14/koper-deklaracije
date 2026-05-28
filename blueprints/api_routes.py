@@ -29,6 +29,7 @@ from services.sync_parfumi_service import (
     DEFAULT_SYNC_STORE,
     sync_parfumi_from_shopify,
 )
+from services.restore_parfumi_names import restore_parfumi_names_from_excel
 import io
 from openpyxl import Workbook
 import traceback
@@ -1746,6 +1747,7 @@ def required_permission_for(method: str, path: str):
         '/api/migrate-onedrive',
         '/api/migrate-local-excel',
         '/api/migrate-local-file',
+        '/api/restore-parfumi-names',
         '/api/run-migration',
         '/api/register-webhooks',
         '/api/list-webhooks',
@@ -6655,6 +6657,55 @@ def migrate_perfumes_endpoint():
 
     except Exception as e:
         current_app.logger.error(f"Napaka pri migraciji parfumov: {e}")
+        traceback.print_exc()
+        return jsonify({"error": f"Prišlo je do napake na strežniku: {str(e)}"}), 500
+
+
+@api_bp.route('/restore-parfumi-names', methods=['POST'])
+def restore_parfumi_names_endpoint():
+    """Obnovi samo ime_parfuma iz Excel zvezka Parfumi (upload ali privzeta datoteka)."""
+    dry_run = True
+    try:
+        if request.content_type and 'multipart/form-data' in request.content_type:
+            dry_run = request.form.get('dry_run', 'true').lower() != 'false'
+            upload = request.files.get('file')
+            if not upload or not upload.filename:
+                return jsonify({"error": "Manjka Excel datoteka (file)."}), 400
+            file_bytes = upload.read()
+            result = restore_parfumi_names_from_excel(
+                file_bytes=file_bytes,
+                dry_run=dry_run,
+            )
+        else:
+            data = request.get_json(silent=True) or {}
+            dry_run = bool(data.get('dry_run', True))
+            file_path = (data.get('file_path') or 'DEKLARACIJE_PARFUMOV_KOPER.xlsm').strip()
+            import os
+            if not os.path.isfile(file_path):
+                return jsonify({
+                    "error": (
+                        f"Excel datoteka '{file_path}' ne obstaja na strežniku. "
+                        "Naloži jo kot multipart/form-data (file)."
+                    ),
+                }), 400
+            result = restore_parfumi_names_from_excel(
+                file_path=file_path,
+                dry_run=dry_run,
+            )
+
+        if result.get("error"):
+            return jsonify({"error": result["error"], "result": result}), 500
+
+        action = "Simulacija" if dry_run else "Obnovitev"
+        message = (
+            f"{action} imen končana. Excel vrstic: {result.get('excel_rows', 0)}, "
+            f"posodobljenih: {result.get('updated', 0)}, "
+            f"nespremenjenih: {result.get('unchanged', 0)}, "
+            f"v bazi brez Excel zapisa: {result.get('not_in_excel', 0)}."
+        )
+        return jsonify({"message": message, "result": result})
+    except Exception as e:
+        current_app.logger.error(f"Napaka pri obnovi imen parfumov: {e}")
         traceback.print_exc()
         return jsonify({"error": f"Prišlo je do napake na strežniku: {str(e)}"}), 500
 
