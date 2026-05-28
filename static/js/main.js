@@ -3031,17 +3031,36 @@ let narocilaAbortController = null;
     const syncParfumiStartLabel = document.getElementById('sync-parfumi-start-label');
     const syncParfumiCancelBtn = document.getElementById('sync-parfumi-cancel');
     const syncParfumiCloseBtn = document.getElementById('sync-parfumi-modal-close');
+    const syncParfumiProgressEl = document.getElementById('sync-parfumi-progress');
+    const syncParfumiProgressTextEl = document.getElementById('sync-parfumi-progress-text');
     let syncParfumiSelectedStore = SYNC_PARFUMI_DEFAULT_STORE;
     let syncParfumiRunning = false;
+
+    if (syncParfumiModal && syncParfumiModal.parentElement !== document.body) {
+        document.body.appendChild(syncParfumiModal);
+    }
 
     function setSyncParfumiModalOpen(open) {
         if (!syncParfumiModal) return;
         if (open) {
+            if (syncParfumiModal.parentElement !== document.body) {
+                document.body.appendChild(syncParfumiModal);
+            }
             syncParfumiModal.classList.remove('hidden');
             syncParfumiModal.classList.add('flex');
+            document.body.classList.add('overflow-hidden');
         } else {
             syncParfumiModal.classList.add('hidden');
             syncParfumiModal.classList.remove('flex');
+            document.body.classList.remove('overflow-hidden');
+        }
+    }
+
+    function setSyncParfumiProgress(visible, text) {
+        if (!syncParfumiProgressEl) return;
+        syncParfumiProgressEl.classList.toggle('hidden', !visible);
+        if (visible && syncParfumiProgressTextEl && text) {
+            syncParfumiProgressTextEl.textContent = text;
         }
     }
 
@@ -3198,12 +3217,17 @@ let narocilaAbortController = null;
             syncParfumiResultEl.classList.add('hidden');
             syncParfumiResultEl.innerHTML = '';
         }
+        setSyncParfumiProgress(false);
         if (syncParfumiDryRunEl) syncParfumiDryRunEl.checked = false;
         if (syncParfumiStartLabel) syncParfumiStartLabel.textContent = 'Sinhroniziraj';
         setSyncParfumiBusy(false);
     }
 
     async function openSyncParfumiModal() {
+        if (!syncParfumiModal) {
+            showToast('Modal za sinhronizacijo ni na voljo. Osveži stran.', 'danger');
+            return;
+        }
         resetSyncParfumiModal();
         setSyncParfumiModalOpen(true);
         await loadSyncParfumiStores();
@@ -3216,6 +3240,12 @@ let narocilaAbortController = null;
         }
         const dryRun = !!syncParfumiDryRunEl?.checked;
         setSyncParfumiBusy(true);
+        setSyncParfumiProgress(
+            true,
+            dryRun
+                ? 'Simuliram sinhronizacijo (dry run)…'
+                : 'Sinhroniziram izdelke iz Shopify-ja… To lahko traja več minut.',
+        );
         if (syncParfumiResultEl) {
             syncParfumiResultEl.classList.add('hidden');
             syncParfumiResultEl.innerHTML = '';
@@ -3250,6 +3280,7 @@ let narocilaAbortController = null;
             renderSyncParfumiResult(null, error.message);
             showToast(`Napaka pri sinhronizaciji: ${error.message}`, 'danger');
         } finally {
+            setSyncParfumiProgress(false);
             setSyncParfumiBusy(false);
             if (syncParfumiStartLabel) {
                 syncParfumiStartLabel.textContent = syncParfumiDryRunEl?.checked ? 'Simuliraj' : 'Ponovi';

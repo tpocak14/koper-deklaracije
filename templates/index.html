@@ -1022,48 +1022,8 @@
                         </div>
                     </div>
                 </div>
-
-                <!-- Modal: Sinhronizacija parfumov iz Shopify -->
-                <div id="sync-parfumi-modal" class="fixed inset-0 hidden items-center justify-center bg-black/50 z-50 p-4">
-                    <div class="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
-                        <div class="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
-                            <div>
-                                <h4 class="text-base font-semibold text-gray-900">Sinhronizacija parfumov iz Shopify</h4>
-                                <p class="text-xs text-gray-500 mt-0.5">Doda nove parfume in posodobi obstoječe (ime, INCI, na zalogi).</p>
-                            </div>
-                            <button id="sync-parfumi-modal-close" type="button" class="text-gray-500 hover:text-gray-800 disabled:opacity-50" aria-label="Zapri">
-                                <i class="bi bi-x-lg"></i>
-                            </button>
-                        </div>
-                        <div class="p-5 space-y-4">
-                            <div>
-                                <label class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 block mb-1.5">Shopify trgovina</label>
-                                <div id="sync-parfumi-stores" class="space-y-1.5">
-                                    <p class="text-sm text-gray-500">Nalagam trgovine...</p>
-                                </div>
-                            </div>
-                            <label class="flex items-center gap-2 text-sm cursor-pointer">
-                                <input id="sync-parfumi-dry-run" type="checkbox" class="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500">
-                                <span><strong>Dry run</strong> — samo poročaj, ne piši v bazo</span>
-                            </label>
-                            <div class="text-[11px] text-gray-500 bg-gray-50 rounded-md p-2.5 leading-relaxed">
-                                Sinhronizacija prebere vse izdelke iz Shopify-ja in posodobi tabelo <code class="px-1 bg-white rounded">parfumi</code>.
-                                Kriteriji: metafieldi <code class="px-1 bg-white rounded">custom.product_no</code>,
-                                <code class="px-1 bg-white rounded">custom.proizvajalec_id</code> in
-                                <code class="px-1 bg-white rounded">custom.product_fragrance_</code>.
-                            </div>
-                            <div id="sync-parfumi-result" class="hidden"></div>
-                        </div>
-                        <div class="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2 bg-gray-50">
-                            <button id="sync-parfumi-cancel" type="button" class="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white hover:bg-gray-50 disabled:opacity-50">Prekliči</button>
-                            <button id="sync-parfumi-start" type="button" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed">
-                                <i class="bi bi-arrow-repeat"></i>
-                                <span id="sync-parfumi-start-label">Sinhroniziraj</span>
-                            </button>
-                        </div>
-                    </div>
-                </div>
             </div>
+            <!-- Zavihek Navodila -->
             <div class="tab-pane" id="navodila-panel" role="tabpanel">
                 <div class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                     <div class="px-6 py-4 border-b border-gray-200 flex items-center justify-between bg-gradient-to-r from-cyan-50 to-teal-50">
@@ -2749,6 +2709,51 @@
                         </button>
                     </div>
                 </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal: Sinhronizacija parfumov iz Shopify (globalno — zunaj tab-pane) -->
+    <div id="sync-parfumi-modal" class="fixed inset-0 hidden items-center justify-center bg-black/50 z-[200] p-4">
+        <div class="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+            <div class="px-5 py-4 border-b border-gray-200 flex items-start justify-between">
+                <div>
+                    <h4 class="text-base font-semibold text-gray-900">Sinhronizacija parfumov iz Shopify</h4>
+                    <p class="text-xs text-gray-500 mt-0.5">Doda nove parfume in posodobi obstoječe (ime, INCI, na zalogi).</p>
+                </div>
+                <button id="sync-parfumi-modal-close" type="button" class="text-gray-500 hover:text-gray-800 disabled:opacity-50" aria-label="Zapri">
+                    <i class="bi bi-x-lg"></i>
+                </button>
+            </div>
+            <div class="p-5 space-y-4">
+                <div>
+                    <label class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 block mb-1.5">Shopify trgovina</label>
+                    <div id="sync-parfumi-stores" class="space-y-1.5">
+                        <p class="text-sm text-gray-500">Nalagam trgovine...</p>
+                    </div>
+                </div>
+                <label class="flex items-center gap-2 text-sm cursor-pointer">
+                    <input id="sync-parfumi-dry-run" type="checkbox" class="rounded border-gray-300 text-emerald-600 focus:ring-emerald-500">
+                    <span><strong>Dry run</strong> — samo poročaj, ne piši v bazo</span>
+                </label>
+                <div id="sync-parfumi-progress" class="hidden text-sm text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2 flex items-center gap-2">
+                    <span class="inline-block w-3 h-3 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin"></span>
+                    <span id="sync-parfumi-progress-text">Sinhroniziram izdelke iz Shopify-ja… To lahko traja več minut.</span>
+                </div>
+                <div class="text-[11px] text-gray-500 bg-gray-50 rounded-md p-2.5 leading-relaxed">
+                    Sinhronizacija prebere vse izdelke iz Shopify-ja in posodobi tabelo <code class="px-1 bg-white rounded">parfumi</code>.
+                    Kriteriji: metafieldi <code class="px-1 bg-white rounded">custom.product_no</code>,
+                    <code class="px-1 bg-white rounded">custom.proizvajalec_id</code> in
+                    <code class="px-1 bg-white rounded">custom.product_fragrance_</code>.
+                </div>
+                <div id="sync-parfumi-result" class="hidden"></div>
+            </div>
+            <div class="px-5 py-3 border-t border-gray-200 flex items-center justify-end gap-2 bg-gray-50">
+                <button id="sync-parfumi-cancel" type="button" class="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white hover:bg-gray-50 disabled:opacity-50">Prekliči</button>
+                <button id="sync-parfumi-start" type="button" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed">
+                    <i class="bi bi-arrow-repeat"></i>
+                    <span id="sync-parfumi-start-label">Sinhroniziraj</span>
+                </button>
             </div>
         </div>
     </div>
