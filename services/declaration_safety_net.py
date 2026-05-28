@@ -577,6 +577,292 @@ def build_mandrill_merge_vars(
     return [{"name": k, "content": v} for k, v in vars_map.items()]
 
 
+# ---------------------------------------------------------------------------
+# Mandrill send (primary) + SMTP fallback (opt-in)
+# ---------------------------------------------------------------------------
+
+_MANDRILL_FAILURE_STATUSES = frozenset(
+    {"rejected", "invalid", "bounced", "soft-bounced", "spam"}
+)
+
+
+def smtp_declaration_fallback_enabled() -> bool:
+    """SMTP rezerva je privzeto izklopljena; vklopi z SMTP_DECLARATION_FALLBACK=1."""
+    v = (os.environ.get("SMTP_DECLARATION_FALLBACK", "") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _mandrill_already_sent(order_data: Dict[str, Any]) -> bool:
+    mid = order_data.get("mandrill_safety_message_id")
+    if not mid:
+        return False
+    status = (order_data.get("mandrill_safety_status") or "").lower()
+    return status not in _MANDRILL_FAILURE_STATUSES
+
+
+def send_declaration_via_mandrill(
+    order_data: Dict[str, Any],
+    pdf_path: str,
+    declaration_items: List[Dict[str, Any]],
+    cursor,
+    *,
+    force: bool = False,
+    skip_log_cross_check: bool = False,
+) -> Dict[str, Any]:
+    """Pošlji deklaracijo kupcu prek Mandrill template API.
+
+    Returns dict: success, message_id, status, template, reason, action.
+    """
+    order_number = order_data.get("order_number")
+    result: Dict[str, Any] = {
+        "success": False,
+        "order_number": order_number,
+        "message_id": None,
+        "status": None,
+        "template": None,
+        "reason": "",
+        "action": "error",
+    }
+
+    if not order_number:
+        result["reason"] = "missing_order_number"
+        return result
+
+    if not force and _mandrill_already_sent(order_data):
+        result["success"] = True
+        result["message_id"] = order_data.get("mandrill_safety_message_id")
+        result["status"] = order_data.get("mandrill_safety_status")
+        result["action"] = "already_sent"
+        result["reason"] = f"že poslano: {result['message_id']}"
+        return result
+
+    country_code = (order_data.get("country_code") or "").strip().upper() or None
+    target_template_name = pick_declaration_template_name(country_code)
+    target_template_slug = target_template_name.replace("_", "-")
+    result["template"] = target_template_name
+
+    if not skip_log_cross_check:
+        try:
+            recipient_email = order_data.get("customer_email") or order_data.get("email")
+            if recipient_email:
+                from datetime import timedelta as _td
+
+                cutoff_from = (datetime.now() - _td(days=14)).strftime("%Y-%m-%d")
+                cutoff_to = (datetime.now() + _td(days=1)).strftime("%Y-%m-%d")
+                msgs = mandrill_service.messages_search(
+                    query=(
+                        f"full_email:{recipient_email} AND template:{target_template_slug}"
+                    ),
+                    date_from=cutoff_from,
+                    date_to=cutoff_to,
+                    limit=20,
+                )
+                own_order = str(order_number).lstrip("#").strip()
+                for m in msgs or []:
+                    md = m.get("metadata") or {}
+                    mid_order = str(md.get("order_id") or "").lstrip("#").strip()
+                    if mid_order and mid_order == own_order:
+                        message_id = m.get("_id")
+                        cursor.execute(
+                            """
+                            UPDATE orders SET
+                                mandrill_safety_attempted_at = COALESCE(mandrill_safety_attempted_at, NOW()),
+                                mandrill_safety_message_id = %s,
+                                mandrill_safety_status = %s
+                              WHERE order_number = %s
+                            """,
+                            (message_id, "sent_externally", order_number),
+                        )
+                        result["success"] = True
+                        result["message_id"] = message_id
+                        result["status"] = "sent_externally"
+                        result["action"] = "sent_externally"
+                        result["reason"] = (
+                            f"Mandrill log že vsebuje {target_template_slug}: {message_id}"
+                        )
+                        return result
+        except Exception as e:
+            logger.warning("Mandrill log cross-check failed for %s: %s", order_number, e)
+
+    merge_vars = build_mandrill_merge_vars(order_data, declaration_items)
+    if not pdf_path or not os.path.isfile(pdf_path):
+        result["reason"] = "pdf_missing"
+        return result
+
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    recipient_email = order_data.get("customer_email") or order_data.get("email")
+    if not recipient_email:
+        result["reason"] = "missing_customer_email"
+        return result
+
+    recipient_name = (
+        order_data.get("customer_name")
+        or _compose_name(
+            order_data.get("customer_first_name"),
+            order_data.get("customer_last_name"),
+        )
+        or recipient_email
+    )
+
+    bcc_admin = (os.environ.get("ADMIN_BCC_DECLARATION_EMAIL", "") or "").strip() or None
+    order_number_clean = str(order_number or "").lstrip("#").strip()
+
+    try:
+        mandrill_resp = mandrill_service.send_template(
+            template_name=target_template_name,
+            to=[{"email": recipient_email, "name": recipient_name}],
+            global_merge_vars=merge_vars,
+            attachments=[
+                {
+                    "filename": f"Deklaracija_{order_number}.pdf",
+                    "data": pdf_bytes,
+                    "type": "application/pdf",
+                }
+            ],
+            tags=[
+                "safety-net",
+                "declaration",
+                target_template_name,
+                f"order:{order_number_clean}",
+            ],
+            metadata={
+                "order_id": order_number_clean,
+                "country": country_code or "",
+            },
+            bcc_address=bcc_admin,
+        )
+    except Exception as e:
+        logger.exception(
+            "Mandrill send_template failed for %s (template=%s)",
+            order_number,
+            target_template_name,
+        )
+        result["reason"] = f"mandrill_send_failed: {e}"
+        return result
+
+    msg = (mandrill_resp or [{}])[0]
+    message_id = msg.get("_id")
+    status = msg.get("status", "unknown")
+
+    cursor.execute(
+        """
+        UPDATE orders SET
+            mandrill_safety_attempted_at = NOW(),
+            mandrill_safety_message_id = %s,
+            mandrill_safety_status = %s,
+            email_sent_at = NOW(),
+            email_recipient = %s,
+            status = 'email_poslan'
+        WHERE order_number = %s
+        """,
+        (message_id, status, recipient_email, order_number),
+    )
+
+    result["success"] = True
+    result["message_id"] = message_id
+    result["status"] = status
+    result["action"] = "uploaded_and_mandrill"
+    result["reason"] = f"mandrill sent (status={status})"
+    return result
+
+
+def try_smtp_declaration_fallback(
+    order_data: Dict[str, Any],
+    pdf_path: str,
+    declaration_items: List[Dict[str, Any]],
+    line_items: List[Dict[str, Any]],
+    cursor,
+) -> Dict[str, Any]:
+    """Rezervna SMTP pot — samo če je SMTP_DECLARATION_FALLBACK=1."""
+    order_number = order_data.get("order_number")
+    out: Dict[str, Any] = {
+        "success": False,
+        "order_number": order_number,
+        "channel": "smtp",
+        "reason": "",
+    }
+    if not smtp_declaration_fallback_enabled():
+        out["reason"] = "smtp_fallback_disabled"
+        return out
+
+    from services.email_service import poslji_email_s_pdf
+    from flask import current_app
+
+    recipient = order_data.get("customer_email") or order_data.get("email")
+    if not recipient:
+        out["reason"] = "missing_customer_email"
+        return out
+
+    shop_url = f"https://{current_app.config.get('SHOP_NAME', 'amour-parfums')}.myshopify.com"
+    ok = poslji_email_s_pdf(
+        recipient_email=recipient,
+        order_number=order_number,
+        shopify_order_id=order_data.get("shopify_order_id"),
+        pdf_path=pdf_path,
+        declaration_items=declaration_items,
+        status_url=order_data.get("status_url"),
+        shop_url=shop_url,
+        country_code=order_data.get("country_code"),
+        line_items=line_items,
+        skip_test_redirect=True,
+        allow_smtp_fallback=True,
+    )
+    if not ok:
+        out["reason"] = "smtp_send_failed"
+        return out
+
+    cursor.execute(
+        """
+        UPDATE orders SET
+            mandrill_safety_attempted_at = COALESCE(mandrill_safety_attempted_at, NOW()),
+            mandrill_safety_status = 'legacy_smtp_sent',
+            email_sent_at = NOW(),
+            email_recipient = %s,
+            status = 'email_poslan'
+        WHERE order_number = %s
+        """,
+        (recipient, order_number),
+    )
+    out["success"] = True
+    out["reason"] = "legacy_smtp_sent"
+    return out
+
+
+def send_declaration_email(
+    order_data: Dict[str, Any],
+    pdf_path: str,
+    declaration_items: List[Dict[str, Any]],
+    line_items: List[Dict[str, Any]],
+    cursor,
+    *,
+    force: bool = False,
+    allow_smtp_fallback: bool = True,
+) -> Dict[str, Any]:
+    """Primarna Mandrill pot; SMTP samo ob neuspehu (če je env vklopljen)."""
+    mandrill = send_declaration_via_mandrill(
+        order_data,
+        pdf_path,
+        declaration_items,
+        cursor,
+        force=force,
+    )
+    if mandrill.get("success"):
+        mandrill["channel"] = "mandrill"
+        return mandrill
+
+    if allow_smtp_fallback and smtp_declaration_fallback_enabled():
+        smtp = try_smtp_declaration_fallback(
+            order_data, pdf_path, declaration_items, line_items, cursor
+        )
+        if smtp.get("success"):
+            return smtp
+
+    mandrill["channel"] = "none"
+    return mandrill
+
+
 def _compose_name(first: Optional[str], last: Optional[str]) -> Optional[str]:
     parts = [p for p in [first, last] if p]
     return " ".join(parts) if parts else None
@@ -948,163 +1234,35 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
             )
             return result
 
-        # 10. Idempotency check: če je že bil poslan safety-net mail prej (npr.
-        #     v zadnji uri prek paralelnega job-a), preskoči, da ne spam-amo.
-        if order_data.get("mandrill_safety_message_id"):
-            existing_id = order_data["mandrill_safety_message_id"]
-            existing_status = (order_data.get("mandrill_safety_status") or "").lower()
-            # Če je bilo poslano in NI v failure state, ne pošlji ponovno.
-            if existing_status not in ("rejected", "invalid", "bounced", "soft-bounced", "spam"):
+        # 10–11. Pošlji prek Mandrill (primarno); SMTP samo ob neuspehu (env).
+        line_items = _parse_line_items(order_data)
+        send_res = send_declaration_email(
+            order_data,
+            pdf_path,
+            analysis["declaration_items"],
+            line_items,
+            cursor,
+            allow_smtp_fallback=True,
+        )
+        if send_res.get("success"):
+            result["mandrill_message_id"] = send_res.get("message_id")
+            result["mandrill_template"] = send_res.get("template")
+            mk_status = mk_status_full.get("status_code") or mk_status_full.get("status_desc")
+            channel = send_res.get("channel", "mandrill")
+            if send_res.get("action") in ("already_sent", "sent_externally"):
                 result["action"] = "uploaded_mk_only"
-                result["reason"] = (
-                    f"safety net mail že poslan prej: {existing_id} (status={existing_status})"
-                )
-                result["mandrill_message_id"] = existing_id
-                return result
-
-        # 11. Cross-check: morda je MK že uspešno sprožil mail prej (npr. pred
-        #     to napako). Preverimo Mandrill log za zadnjih 14 dni, ali že obstaja
-        #     deklaracijski email za tega kupca **v pravem jeziku**.
-        #
-        #     POMEMBNO — jezikovna občutljivost:
-        #     MK Order Management ima Mandrill trigger hardkodiran na
-        #     `deklaracije-si`, zato MK vsem strankam (tudi DE/AT/EN/...)
-        #     pošlje SI mail. V tem primeru "deklaracija je bila poslana" je
-        #     resnično le, če je bila poslana v **stranki ustreznem jeziku**.
-        #     Sicer mora naš safety net poslati pravo jezikovno različico
-        #     (rezultat: dva mail-a — eden v SI od MK, drugi v lokalnem
-        #     jeziku od nas; dokler MK trigger ni rekonfiguriran).
-        country_code = (order_data.get("country_code") or "").strip().upper() or None
-        target_template_name = pick_declaration_template_name(country_code)
-        # Mandrill log API uporablja `slug` (dash-separator), naš `name`
-        # uporablja underscore. Pretvori `deklaracije_de` → `deklaracije-de`.
-        target_template_slug = target_template_name.replace("_", "-")
-        try:
-            recipient_email = order_data.get("customer_email") or order_data.get("email")
-            if recipient_email:
-                from datetime import timedelta as _td
-                cutoff_from = (datetime.now() - _td(days=14)).strftime("%Y-%m-%d")
-                cutoff_to = (datetime.now() + _td(days=1)).strftime("%Y-%m-%d")
-                msgs = mandrill_service.messages_search(
-                    query=(
-                        f"full_email:{recipient_email} AND template:{target_template_slug}"
-                    ),
-                    date_from=cutoff_from, date_to=cutoff_to, limit=20,
-                )
-                # Match po order_id metadata (če je) ali po datumu (within 7 days of fulfillment)
-                already_sent = False
-                for m in msgs or []:
-                    md = (m.get("metadata") or {})
-                    mid_order = str(md.get("order_id") or "").lstrip("#").strip()
-                    own_order = str(order_number).lstrip("#").strip()
-                    if mid_order and mid_order == own_order:
-                        already_sent = True
-                        result["mandrill_message_id"] = m.get("_id")
-                        result["reason"] = (
-                            f"Mandrill log že vsebuje {target_template_slug}: "
-                            f"{m.get('_id')} (state={m.get('state')})"
-                        )
-                        break
-                if already_sent:
-                    cursor.execute(
-                        """
-                        UPDATE orders SET
-                            mandrill_safety_attempted_at = COALESCE(mandrill_safety_attempted_at, NOW()),
-                            mandrill_safety_message_id = %s,
-                            mandrill_safety_status = %s
-                          WHERE order_number = %s
-                        """,
-                        (result["mandrill_message_id"], "sent_externally", order_number)
-                    )
-                    result["action"] = "uploaded_mk_only"
-                    return result
-        except Exception as e:
-            logger.warning("Mandrill log cross-check failed for %s: %s", order_number, e)
-
-        merge_vars = build_mandrill_merge_vars(order_data, analysis["declaration_items"])
-        with open(pdf_path, "rb") as f:
-            pdf_bytes = f.read()
-
-        recipient_email = order_data.get("customer_email") or order_data.get("email")
-        if not recipient_email:
-            result["action"] = "error"
-            result["reason"] = "missing_customer_email"
+            elif channel == "smtp":
+                result["action"] = "uploaded_and_mandrill"
+            else:
+                result["action"] = "uploaded_and_mandrill"
+            result["reason"] = (
+                f"mk_status={mk_status or 'unknown'}, attached_to={attach.get('doc_type')} "
+                f"→ {channel} ({send_res.get('reason')})"
+            )
             return result
 
-        recipient_name = (order_data.get("customer_name")
-                          or _compose_name(order_data.get("customer_first_name"),
-                                           order_data.get("customer_last_name"))
-                          or recipient_email)
-
-        # `target_template_name` in `country_code` sta že določena zgoraj
-        # (uporabljeni za idempotency cross-check). PDF priponka je že
-        # lokalizirana v pdf_service.ustvari_pdf po istem country_code-u,
-        # tako da sta email body in PDF v istem jeziku.
-        result["mandrill_template"] = target_template_name
-
-        # Admin BCC za monitoring: če je nastavljen env var
-        # ADMIN_BCC_DECLARATION_EMAIL (npr. tpocak@gmail.com), Mandrill na ta
-        # naslov pošlje slepo kopijo vsakega send-a. Kupec ne vidi tega naslova
-        # v glavah maila. Za izklop: odstrani env var (ali nastavi prazno).
-        import os as _os
-        bcc_admin = (_os.environ.get("ADMIN_BCC_DECLARATION_EMAIL", "") or "").strip() or None
-
-        # Mandrill tagi ne smejo vsebovati `#` (znak je rezerviran v URL/query
-        # filtrih in povzroča težave pri search-u v Mandrill admin UI ter API).
-        # Order_number ima v DB običajno `#SI2377` → očistimo na `SI2377`.
-        order_number_clean = str(order_number or "").lstrip("#").strip()
-        try:
-            mandrill_resp = mandrill_service.send_template(
-                template_name=target_template_name,
-                to=[{"email": recipient_email, "name": recipient_name}],
-                global_merge_vars=merge_vars,
-                attachments=[{
-                    "filename": f"Deklaracija_{order_number}.pdf",
-                    "data": pdf_bytes,
-                    "type": "application/pdf",
-                }],
-                tags=[
-                    "safety-net",
-                    "declaration",
-                    target_template_name,
-                    f"order:{order_number_clean}",
-                ],
-                metadata={
-                    "order_id": order_number_clean,
-                    "country": country_code or "",
-                },
-                bcc_address=bcc_admin,
-            )
-        except Exception as e:
-            logger.exception(
-                "Mandrill send_template failed for %s (template=%s, country=%s)",
-                order_number, target_template_name, country_code,
-            )
-            result["action"] = "error"
-            result["reason"] = f"mandrill_send_failed: {e}"
-            return result
-
-        msg = (mandrill_resp or [{}])[0]
-        message_id = msg.get("_id")
-        status = msg.get("status", "unknown")
-
-        cursor.execute(
-            """
-            UPDATE orders SET
-                mandrill_safety_attempted_at = NOW(),
-                mandrill_safety_message_id = %s,
-                mandrill_safety_status = %s
-            WHERE order_number = %s
-            """,
-            (message_id, status, order_number)
-        )
-
-        result["action"] = "uploaded_and_mandrill"
-        result["reason"] = (
-            f"mk_status={mk_status or 'unknown'}, attached_to={attach.get('doc_type')} "
-            f"→ direct Mandrill send (status={status})"
-        )
-        result["mandrill_message_id"] = message_id
+        result["action"] = "error"
+        result["reason"] = send_res.get("reason", "send_failed")
         return result
 
     except Exception as e:

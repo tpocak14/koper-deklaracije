@@ -1,16 +1,14 @@
-"""One-off: test declaration SMTP + ADMIN_BCC_DECLARATION_EMAIL."""
+"""One-off: test declaration Mandrill send (+ admin BCC)."""
 import json
 import sys
 
 from app import app
 from database import get_db
-from services.email_service import poslji_email_s_pdf
+from services.declaration_safety_net import send_declaration_email
 from services.pdf_service import ustvari_pdf
 from services.shopify_service import clear_product_cache, get_bulk_product_details
 
 ORDER_NUMBER = sys.argv[1] if len(sys.argv) > 1 else "#SI2483"
-# +alias → isti inbox, drugačen To kot BCC naslov
-TEST_TO = sys.argv[2] if len(sys.argv) > 2 else "pocak.tomas+test@gmail.com"
 
 
 def main() -> int:
@@ -97,22 +95,20 @@ def main() -> int:
             return 1
 
         bcc_env = __import__("os").environ.get("ADMIN_BCC_DECLARATION_EMAIL", "")
-        print(f"Sending TO={TEST_TO} BCC env={bcc_env!r} order={on}")
+        print(f"Sending Mandrill order={on} BCC env={bcc_env!r}")
 
-        ok = poslji_email_s_pdf(
-            recipient_email=TEST_TO,
-            order_number=on,
-            shopify_order_id=order["shopify_order_id"],
-            pdf_path=pdf_path,
-            declaration_items=declaration_items,
-            status_url=order["status_url"],
-            shop_url="https://amour-parfums.myshopify.com",
-            country_code=order["country_code"],
-            line_items=email_line_items,
-            skip_test_redirect=True,
+        order_dict = dict(order) if not isinstance(order, dict) else order
+        send_res = send_declaration_email(
+            order_dict,
+            pdf_path,
+            declaration_items,
+            email_line_items,
+            c,
+            force=True,
+            allow_smtp_fallback=True,
         )
-        print("OK" if ok else "FAILED")
-        return 0 if ok else 2
+        print(send_res)
+        return 0 if send_res.get("success") else 2
 
 
 if __name__ == "__main__":

@@ -3554,48 +3554,17 @@ def sync_fulfilled_status_endpoint():
                         if not pdf_path:
                             current_app.logger.error(f"Napaka pri generiranju PDF-ja za naročilo {order_number}: {pdf_message}")
                             continue
-                        
-                        # 6. Pošlji email
-                        # Pripravimo email_line_items iz line_items
-                        email_line_items = []
-                        for item in line_items:
-                            if not item: continue
-                            try:
-                                price = float(item.get('price', 0.0))
-                            except (ValueError, TypeError):
-                                price = 0.0
 
-                            email_line_items.append({
-                                'title': item.get('title', 'N/A'),
-                                'quantity': item.get('quantity', 1),
-                                'price': price,
-                                'image_url': item.get('image_url', 'https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-image_large.png?v=1529089297')
-                            })
-                        
-                        from services.email_service import poslji_email_s_pdf
-                        email_success = poslji_email_s_pdf(
-                            recipient_email=order_data['customer_email'],
-                            order_number=order_number,
-                            shopify_order_id=shopify_order_id,
-                            pdf_path=pdf_path,
-                            declaration_items=declaration_items,
-                            status_url=order_data['status_url'],
-                            shop_url=f"https://{current_app.config['SHOP_NAME']}.myshopify.com",
-                            country_code=order_data['country_code'],
-                            line_items=email_line_items
-                        )
-                        
-                        # 7. Posodobi status v bazi
                         cursor.execute("""
                             UPDATE orders 
-                            SET pdf_generated_at = NOW(), 
-                                email_sent_at = NOW(),
-                                email_recipient = %s,
-                                processed_at = NOW()
+                            SET pdf_generated_at = NOW(), processed_at = NOW()
                             WHERE shopify_order_id = %s
-                        """, (order_data['customer_email'], shopify_order_id))
+                        """, (shopify_order_id,))
                         
-                        current_app.logger.info(f"Uspešno procesirano fulfilled naročilo {order_number}: PDF generiran, email poslan")
+                        current_app.logger.info(
+                            f"Fulfilled naročilo {order_number}: PDF pripravljen; "
+                            f"Mandrill pošiljanje prepuščeno safety net job-u"
+                        )
                         
                     except Exception as e:
                         current_app.logger.error(f"Napaka pri avtomatskem procesiranju fulfilled naročila {order_number}: {e}")
@@ -3738,57 +3707,12 @@ def process_unprocessed_fulfilled_orders():
                 else:
                     pdf_path = None
                 
-                # 5. Pošlji email (če še ni)
-                if not order_data['email_sent_at']:
-                    _shop_domain_for_decl = order_data.get('shopify_store_domain') if isinstance(order_data, dict) else None
-                    line_items_raw = order_data['line_items'] or '[]'
-                    line_items = json.loads(line_items_raw) if isinstance(line_items_raw, str) else (line_items_raw or [])
-                    declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo_iz_shopify(
-                        line_items, cursor, shop_domain=_shop_domain_for_decl,
-                    )
-                    
-                    # Pripravimo email_line_items iz line_items
-                    email_line_items = []
-                    for item in line_items:
-                        if not item: continue
-                        try:
-                            price = float(item.get('price', 0.0))
-                        except (ValueError, TypeError):
-                            price = 0.0
-
-                        email_line_items.append({
-                            'title': item.get('title', 'N/A'),
-                            'quantity': item.get('quantity', 1),
-                            'price': price,
-                            'image_url': item.get('image_url', 'https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-image_large.png?v=1529089297')
-                        })
-                    
-                    from services.email_service import poslji_email_s_pdf
-                    email_success = poslji_email_s_pdf(
-                        recipient_email=order_data['customer_email'],
-                        order_number=order_number,
-                        shopify_order_id=shopify_order_id,
-                        pdf_path=pdf_path,
-                        declaration_items=declaration_items,
-                        status_url=order_data['status_url'],
-                        shop_url=f"https://{current_app.config['SHOP_NAME']}.myshopify.com",
-                        country_code=order_data['country_code'],
-                        line_items=email_line_items
-                    )
-                else:
-                    email_success = True
-                
-                # 6. Posodobi status v bazi
+                # 5. PDF pripravljen — pošiljanje kupcu prepuščeno Mandrill safety net-u
                 update_fields = []
                 update_params = []
                 
-                if not order_data['pdf_generated_at']:
+                if not order_data['pdf_generated_at'] and pdf_path:
                     update_fields.append("pdf_generated_at = NOW()")
-                
-                if not order_data['email_sent_at']:
-                    update_fields.append("email_sent_at = NOW()")
-                    update_fields.append("email_recipient = %s")
-                    update_params.append(order_data['customer_email'])
                 
                 if not order_data['processed_at']:
                     update_fields.append("processed_at = NOW()")
@@ -3802,7 +3726,9 @@ def process_unprocessed_fulfilled_orders():
                     """, update_params)
                 
                 processed_count += 1
-                current_app.logger.info(f"Uspešno procesirano fulfilled naročilo {order_number}")
+                current_app.logger.info(
+                    f"Fulfilled naročilo {order_number}: PDF OK; Mandrill po safety net-u"
+                )
                 
             except Exception as e:
                 current_app.logger.error(f"Napaka pri procesiranju fulfilled naročila {order_data.get('order_number', 'N/A')}: {e}")
@@ -5053,33 +4979,36 @@ def generiraj_in_poslji():
             )
             db.commit()
         
-        # Preveri, ali je email že bil poslan
-        if order.get('email_sent_at'):
-            current_app.logger.info(f"Email je že bil poslan za naročilo {order_number_with_hash} ob {order['email_sent_at']}. Preskačem pošiljanje.")
-            return jsonify({"sporocilo": "Email je že bil poslan za to naročilo."}), 400
+        # Preveri, ali je Mandrill že poslal
+        if order.get('mandrill_safety_message_id') and (order.get('mandrill_safety_status') or '').lower() not in (
+            'rejected', 'invalid', 'bounced', 'soft-bounced', 'spam'
+        ):
+            current_app.logger.info(
+                f"Mandrill mail že poslan za {order_number_with_hash}: "
+                f"{order.get('mandrill_safety_message_id')}"
+            )
+            return jsonify({"sporocilo": "Deklaracija je že bila poslana (Mandrill)."}), 400
         
-        # Klic email servisa
-        email_success = poslji_email_s_pdf(
-            recipient_email=order['customer_email'], 
-            order_number=order_number_with_hash, 
-            shopify_order_id=order['shopify_order_id'], 
-            pdf_path=pdf_path, 
-            declaration_items=declaration_items, 
-            status_url=order['status_url'], 
-            shop_url=f"https://{current_app.config['SHOP_NAME']}.myshopify.com", 
-            country_code=order['country_code'], 
-            line_items=email_line_items
+        from services.declaration_safety_net import send_declaration_email
+        order_dict = dict(order) if not isinstance(order, dict) else order
+        send_res = send_declaration_email(
+            order_dict,
+            pdf_path,
+            declaration_items,
+            email_line_items,
+            cursor,
+            allow_smtp_fallback=True,
         )
         
-        if email_success:
-            cursor.execute(
-                "UPDATE orders SET email_sent_at = NOW(), email_recipient = %s, status = 'email_poslan' WHERE order_number = %s",
-                (order['customer_email'], order_number_with_hash)
-            )
+        if send_res.get('success'):
             db.commit()
-            return jsonify({"sporocilo": "Deklaracija uspešno poslana!"})
+            ch = send_res.get('channel', 'mandrill')
+            return jsonify({
+                "sporocilo": f"Deklaracija poslana prek {ch}!",
+                "mandrill_message_id": send_res.get('message_id'),
+            })
         else:
-            return jsonify({"sporocilo": "Napaka pri pošiljanju emaila."}), 500
+            return jsonify({"sporocilo": f"Napaka pri pošiljanju: {send_res.get('reason')}"}), 500
             
     except Exception as e:
         db.rollback()
@@ -5168,32 +5097,37 @@ def ponovno_poslji_deklaracijo():
         pdf_path, pdf_msg = ustvari_pdf(declaration_items, email_line_items, order['country_code'], order_number, [])
         if not pdf_path: return jsonify({"sporocilo": pdf_msg}), 500
         
-        # Pošljemo email
+        # Pošljemo prek Mandrill (force = ponovno pošiljanje)
         recipient_email = nov_email if nov_email else order['customer_email']
         current_app.logger.info(f"Uporabljam recipient_email: '{recipient_email}' (nov_email: '{nov_email}', original: '{order['customer_email']}')")
         
-        email_success = poslji_email_s_pdf(
-            recipient_email=recipient_email, 
-            order_number=order_number, 
-            shopify_order_id=order['shopify_order_id'], 
-            pdf_path=pdf_path, 
-            declaration_items=declaration_items, 
-            status_url=order['status_url'], 
-            shop_url=f"https://{current_app.config['SHOP_NAME']}.myshopify.com", 
-            country_code=order['country_code'], 
-            line_items=email_line_items,
-            skip_test_redirect=True  # Preskočimo test preusmeritev za ponovno pošiljanje
+        from services.declaration_safety_net import send_declaration_email
+        order_dict = dict(order) if not isinstance(order, dict) else order
+        if nov_email:
+            order_dict = {**order_dict, 'customer_email': nov_email}
+        send_res = send_declaration_email(
+            order_dict,
+            pdf_path,
+            declaration_items,
+            email_line_items,
+            cursor,
+            force=True,
+            allow_smtp_fallback=True,
         )
         
-        if email_success:
+        if send_res.get('success'):
             cursor.execute(
-                "UPDATE orders SET email_sent_at = NOW(), email_recipient = %s, status = 'email_poslan', pdf_generated_at = NOW() WHERE order_number = %s",
-                (recipient_email, order_number)
+                "UPDATE orders SET pdf_generated_at = NOW() WHERE order_number = %s",
+                (order_number,)
             )
             db.commit()
-            return jsonify({"sporocilo": "Deklaracija uspešno ponovno poslana!"})
+            ch = send_res.get('channel', 'mandrill')
+            return jsonify({
+                "sporocilo": f"Deklaracija ponovno poslana prek {ch}!",
+                "mandrill_message_id": send_res.get('message_id'),
+            })
         else:
-            return jsonify({"sporocilo": "Napaka pri pošiljanju emaila."}), 500
+            return jsonify({"sporocilo": f"Napaka pri pošiljanju: {send_res.get('reason')}"}), 500
 
     except Exception as e:
         db.rollback()

@@ -767,7 +767,7 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                                     if _shrani_deklaracijo_v_bazo(order_data['order_number'], declaration_items, cursor):
                                         try:
                                             from services.pdf_service import ustvari_pdf
-                                            from services.email_service import poslji_email_s_pdf, send_invoice_email
+                                            from services.email_service import send_invoice_email
                                             cursor.execute(
                                                 "SELECT customer_email, country_code, status_url FROM orders WHERE order_number = %s",
                                                 (order_data['order_number'],)
@@ -781,22 +781,14 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                                                     order_data['order_number']
                                                 )
                                                 if pdf_path:
-                                                    email_success = poslji_email_s_pdf(
-                                                        recipient_email=order_details['customer_email'],
-                                                        order_number=order_data['order_number'],
-                                                        shopify_order_id=str(order_id),
-                                                        pdf_path=pdf_path,
-                                                        declaration_items=declaration_items,
-                                                        status_url=order_details['status_url'],
-                                                        shop_url=f"https://{shop_domain}" if shop_domain else f"https://{current_app.config['SHOP_NAME']}.myshopify.com",
-                                                        country_code=order_details['country_code'],
-                                                        line_items=line_items
+                                                    cursor.execute(
+                                                        "UPDATE orders SET pdf_generated_at = NOW() WHERE order_number = %s",
+                                                        (order_data['order_number'],)
                                                     )
-                                                    if email_success:
-                                                        cursor.execute(
-                                                            "UPDATE orders SET email_sent_at = NOW(), email_recipient = %s, status = 'email_poslan', pdf_generated_at = NOW() WHERE order_number = %s",
-                                                            (order_details['customer_email'], order_data['order_number'])
-                                                        )
+                                                    current_app.logger.info(
+                                                        f"PDF pripravljen za {order_data['order_number']}; "
+                                                        f"pošiljanje kupcu prek Mandrill safety net (ne SMTP)"
+                                                    )
                                                     # TEST: samodejno pošlji uradni RAČUN (MK PDF) po fulfilled (adminu)
                                                     try:
                                                         from services.mk_service import mk_find_bill_any, mk_is_published, mk_print_bill_pdf

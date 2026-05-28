@@ -14,9 +14,18 @@ from io import StringIO
 import requests
 import os
 
-def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path, declaration_items, status_url, shop_url, country_code, line_items, skip_test_redirect=False):
-    """Pošlje email s PDF prilogo."""
+def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path, declaration_items, status_url, shop_url, country_code, line_items, skip_test_redirect=False, allow_smtp_fallback=False):
+    """Pošlje email s PDF prilogo (legacy SMTP — rezerva, ne primarna pot)."""
     try:
+        # Deklaracije pošiljamo prek Mandrilla; SMTP je rezerva (allow_smtp_fallback).
+        if order_number is not None and not allow_smtp_fallback:
+            disabled = (os.environ.get("DISABLE_SMTP_DECLARATION_EMAIL", "1") or "1").strip().lower()
+            if disabled in ("1", "true", "yes", "on"):
+                current_app.logger.info(
+                    f"SMTP declaration disabled for {order_number} — use Mandrill safety net"
+                )
+                return False
+
         # GLOBAL: izklop pošiljanja deklaracij za naročila
         # Izjema: ročno/ponovno pošiljanje (skip_test_redirect=True)
         if order_number is not None and not skip_test_redirect:
