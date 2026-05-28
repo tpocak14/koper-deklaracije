@@ -34,6 +34,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
+from services import email_routing
+
 logger = logging.getLogger(__name__)
 
 MANDRILL_BASE_URL = "https://mandrillapp.com/api/1.0"
@@ -149,6 +151,16 @@ def send_template(
     Raises:
         MandrillError: če API klic ni uspel
     """
+    to, subject_prefix, redirected = email_routing.resolve_recipient_list(to)
+    if subject_prefix and subject:
+        subject = subject_prefix + subject
+    elif subject_prefix:
+        subject = subject_prefix.rstrip()
+
+    # Pri global redirect ne pošiljamo BCC (admin že prejme mail)
+    if redirected:
+        bcc_address = None
+
     message: Dict[str, Any] = {
         "from_email": from_email,
         "from_name": from_name,

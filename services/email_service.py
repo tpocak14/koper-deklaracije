@@ -56,7 +56,15 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
         
         original_recipient = recipient_email
         
-        if email_mode == 'true' and admin_email and not skip_test_redirect:
+        # Global redirect (EMAIL_REDIRECT_TO) — pred DB test mode
+        redirect_to = os.environ.get("EMAIL_REDIRECT_TO", "").strip()
+        if redirect_to:
+            recipient_email = redirect_to
+            current_app.logger.info(
+                f"EMAIL_REDIRECT: Mail za naročilo {order_number} preusmerjen "
+                f"z {original_recipient} na {redirect_to}"
+            )
+        elif email_mode == 'true' and admin_email and not skip_test_redirect:
             # TEST MODE: Samo admin
             recipient_email = admin_email
             current_app.logger.info(f"TEST MODE: Mail za naročilo {order_number} preusmerjen z {original_recipient} na {admin_email}")
