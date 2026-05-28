@@ -600,6 +600,129 @@ def _mandrill_already_sent(order_data: Dict[str, Any]) -> bool:
     return status not in _MANDRILL_FAILURE_STATUSES
 
 
+def _fulfilled_at_local_date(order_data: Dict[str, Any]) -> Optional[date]:
+    """Datum fulfill-a v Europe/Ljubljana (za 21:00 batch pravilo)."""
+    raw = order_data.get("shopify_fulfilled_at") or order_data.get("fulfilled_at")
+    if not raw:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        lj = ZoneInfo("Europe/Ljubljana")
+    except Exception:
+        lj = timezone.utc
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, date):
+        return raw
+    else:
+        try:
+            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(lj).date()
+
+
+def should_wait_for_2100_pdf_batch(order_data: Dict[str, Any]) -> Tuple[bool, str]:
+    """PDF za današnja fulfilled naročila se pripravi šele ob 21:00 (Ljubljana)."""
+    try:
+        from zoneinfo import ZoneInfo
+
+        lj = ZoneInfo("Europe/Ljubljana")
+        now = datetime.now(lj)
+    except Exception:
+        return False, ""
+    if now.hour >= 21:
+        return False, ""
+    fulfilled_day = _fulfilled_at_local_date(order_data)
+    if fulfilled_day and fulfilled_day == now.date():
+        return True, (
+            "PDF deklaracije za današnja fulfilled naročila se pripravi ob 21:00. "
+            "Pošiljanje in generiranje PDF-ja sta onemogočena do takrat."
+        )
+    return False, ""
+
+
+def check_mk_completed_for_send(
+    order_data: Dict[str, Any], cursor
+) -> Dict[str, Any]:
+    """Preveri, ali je MK status 'Zaključeno' — obvezen pred pošiljanjem kupcu."""
+    order_number = order_data.get("order_number")
+    mk_sales_order_id = order_data.get("mk_sales_order_id")
+    if not mk_sales_order_id:
+        mk_sales_order_id = mk_find_and_cache_sales_order_id(order_number, cursor)
+    if not mk_sales_order_id:
+        return {
+            "ok": False,
+            "category": "unknown",
+            "reason": (
+                "MK sales_order ni najden — pošiljanje deklaracije ni dovoljeno "
+                "dokler naročilo ni vidno v MetaKocki."
+            ),
+        }
+    mk_status_full = mk_check_sales_order_status_full(mk_sales_order_id)
+    mk_category = classify_mk_status(
+        mk_status_full.get("status_desc"), mk_status_full.get("status_code")
+    )
+    cursor.execute(
+        """
+        UPDATE orders SET
+            mk_sales_order_id = COALESCE(mk_sales_order_id, %s),
+            mk_last_status_desc = %s,
+            mk_last_status_code = %s,
+            mk_last_status_at = NOW()
+        WHERE order_number = %s
+        """,
+        (
+            mk_sales_order_id,
+            mk_status_full.get("status_desc"),
+            mk_status_full.get("status_code"),
+            order_number,
+        ),
+    )
+    if mk_category == "returned":
+        return {
+            "ok": False,
+            "category": "returned",
+            "reason": "MK status: Vračilo paketa — deklaracija se ne pošlje.",
+        }
+    if mk_category != "completed":
+        status_label = (
+            mk_status_full.get("status_code")
+            or mk_status_full.get("status_desc")
+            or "neznano"
+        )
+        return {
+            "ok": False,
+            "category": mk_category,
+            "reason": (
+                f"MK status ni 'Zaključeno' (trenutno: {status_label}). "
+                f"Deklaracija se pošlje šele po zaključku naročila v MK."
+            ),
+        }
+    return {"ok": True, "category": "completed", "reason": ""}
+
+
+def validate_declaration_send_allowed(
+    order_data: Dict[str, Any], cursor, *, check_pdf_batch: bool = True
+) -> Optional[str]:
+    """Če pošiljanje ni dovoljeno, vrne human-readable razlog (sicer None)."""
+    if check_pdf_batch:
+        wait, msg = should_wait_for_2100_pdf_batch(order_data)
+        if wait:
+            return msg
+    mk = check_mk_completed_for_send(order_data, cursor)
+    if not mk.get("ok"):
+        return mk.get("reason") or "MK status ne dovoli pošiljanja."
+    if not order_data.get("pdf_generated_at") and not order_data.get("mk_decl_uploaded_at"):
+        return (
+            "PDF deklaracije še ni pripravljen (pričakovano ob 21:00 batch-u). "
+            "Pošiljanje ni dovoljeno."
+        )
+    return None
+
 def send_declaration_via_mandrill(
     order_data: Dict[str, Any],
     pdf_path: str,
@@ -626,6 +749,12 @@ def send_declaration_via_mandrill(
 
     if not order_number:
         result["reason"] = "missing_order_number"
+        return result
+
+    mk_gate = check_mk_completed_for_send(order_data, cursor)
+    if not mk_gate.get("ok"):
+        result["action"] = "waiting_mk_completed"
+        result["reason"] = mk_gate.get("reason") or "mk_not_completed"
         return result
 
     if not force and _mandrill_already_sent(order_data):
@@ -840,7 +969,21 @@ def send_declaration_email(
     force: bool = False,
     allow_smtp_fallback: bool = True,
 ) -> Dict[str, Any]:
-    """Primarna Mandrill pot; SMTP samo ob neuspehu (če je env vklopljen)."""
+    """Primarna Mandrill pot; SMTP samo ob neuspehu (če je env vklopljen).
+
+    NE kličite neposredno iz UI — uporabite process_one(), ki upošteva
+    21:00 batch in MK status.
+    """
+    blocked = validate_declaration_send_allowed(order_data, cursor)
+    if blocked:
+        return {
+            "success": False,
+            "order_number": order_data.get("order_number"),
+            "channel": "none",
+            "reason": blocked,
+            "action": "blocked",
+        }
+
     mandrill = send_declaration_via_mandrill(
         order_data,
         pdf_path,
@@ -1111,6 +1254,13 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
         except Exception as e:
             logger.warning("Age check failed for %s: %s", order_number, e)
 
+        return result
+
+    # 3b. PDF batch ob 21:00 — ne generiraj PDF-ja za današnja fulfilled naročila prej
+    wait_batch, wait_reason = should_wait_for_2100_pdf_batch(order_data)
+    if wait_batch:
+        result["action"] = "waiting_2100_batch"
+        result["reason"] = wait_reason
         return result
 
     # 4. PDF se da tvoriti — shrani declarations v DB

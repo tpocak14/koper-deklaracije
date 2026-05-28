@@ -4801,6 +4801,11 @@ def generiraj_in_poslji():
         cursor.execute("SELECT * FROM orders WHERE order_number = %s", (order_number_with_hash,))
         order = cursor.fetchone()
         if not order: return jsonify({"sporocilo": "Naročilo ni najdeno."}), 404
+
+        from services.declaration_safety_net import should_wait_for_2100_pdf_batch
+        wait_batch, wait_msg = should_wait_for_2100_pdf_batch(dict(order))
+        if wait_batch:
+            return jsonify({"sporocilo": wait_msg}), 409
         
         # Najprej preverimo, ali podatki že obstajajo v declarations tabeli
         declaration_data = _pridobi_deklaracijo_iz_baze(order_number_with_hash, cursor)
@@ -4979,36 +4984,24 @@ def generiraj_in_poslji():
             )
             db.commit()
         
-        # Preveri, ali je Mandrill že poslal
-        if order.get('mandrill_safety_message_id') and (order.get('mandrill_safety_status') or '').lower() not in (
-            'rejected', 'invalid', 'bounced', 'soft-bounced', 'spam'
-        ):
-            current_app.logger.info(
-                f"Mandrill mail že poslan za {order_number_with_hash}: "
-                f"{order.get('mandrill_safety_message_id')}"
-            )
-            return jsonify({"sporocilo": "Deklaracija je že bila poslana (Mandrill)."}), 400
-        
-        from services.declaration_safety_net import send_declaration_email
+        # Preveri Mandrill — pošiljanje samo prek safety net (21:00 + MK Zaključeno)
+        from services.declaration_safety_net import process_one, should_wait_for_2100_pdf_batch
         order_dict = dict(order) if not isinstance(order, dict) else order
-        send_res = send_declaration_email(
-            order_dict,
-            pdf_path,
-            declaration_items,
-            email_line_items,
-            cursor,
-            allow_smtp_fallback=True,
-        )
-        
-        if send_res.get('success'):
-            db.commit()
-            ch = send_res.get('channel', 'mandrill')
+        wait, wait_msg = should_wait_for_2100_pdf_batch(order_dict)
+        if wait:
+            return jsonify({"sporocilo": wait_msg}), 409
+
+        send_result = process_one(order_dict, cursor)
+        db.commit()
+        if send_result.get('action') == 'uploaded_and_mandrill':
             return jsonify({
-                "sporocilo": f"Deklaracija poslana prek {ch}!",
-                "mandrill_message_id": send_res.get('message_id'),
+                "sporocilo": "Deklaracija poslana prek Mandrill!",
+                "mandrill_message_id": send_result.get('mandrill_message_id'),
             })
-        else:
-            return jsonify({"sporocilo": f"Napaka pri pošiljanju: {send_res.get('reason')}"}), 500
+        return jsonify({
+            "sporocilo": send_result.get('reason') or "Pošiljanje ni uspelo.",
+            "action": send_result.get('action'),
+        }), 409 if send_result.get('action') in ('waiting_2100_batch', 'uploaded_mk_only') else 500
             
     except Exception as e:
         db.rollback()
@@ -5097,37 +5090,23 @@ def ponovno_poslji_deklaracijo():
         pdf_path, pdf_msg = ustvari_pdf(declaration_items, email_line_items, order['country_code'], order_number, [])
         if not pdf_path: return jsonify({"sporocilo": pdf_msg}), 500
         
-        # Pošljemo prek Mandrill (force = ponovno pošiljanje)
-        recipient_email = nov_email if nov_email else order['customer_email']
-        current_app.logger.info(f"Uporabljam recipient_email: '{recipient_email}' (nov_email: '{nov_email}', original: '{order['customer_email']}')")
-        
-        from services.declaration_safety_net import send_declaration_email
+        # Pošlji prek safety net (MK Zaključeno + 21:00 batch)
+        from services.declaration_safety_net import process_one
         order_dict = dict(order) if not isinstance(order, dict) else order
         if nov_email:
             order_dict = {**order_dict, 'customer_email': nov_email}
-        send_res = send_declaration_email(
-            order_dict,
-            pdf_path,
-            declaration_items,
-            email_line_items,
-            cursor,
-            force=True,
-            allow_smtp_fallback=True,
-        )
-        
-        if send_res.get('success'):
-            cursor.execute(
-                "UPDATE orders SET pdf_generated_at = NOW() WHERE order_number = %s",
-                (order_number,)
-            )
-            db.commit()
-            ch = send_res.get('channel', 'mandrill')
+        send_result = process_one(order_dict, cursor)
+        db.commit()
+
+        if send_result.get('action') == 'uploaded_and_mandrill':
             return jsonify({
-                "sporocilo": f"Deklaracija ponovno poslana prek {ch}!",
-                "mandrill_message_id": send_res.get('message_id'),
+                "sporocilo": "Deklaracija ponovno poslana prek Mandrill!",
+                "mandrill_message_id": send_result.get('mandrill_message_id'),
             })
-        else:
-            return jsonify({"sporocilo": f"Napaka pri pošiljanju: {send_res.get('reason')}"}), 500
+        return jsonify({
+            "sporocilo": send_result.get('reason') or "Pošiljanje ni uspelo.",
+            "action": send_result.get('action'),
+        }), 409 if send_result.get('action') in ('waiting_2100_batch', 'uploaded_mk_only') else 500
 
     except Exception as e:
         db.rollback()

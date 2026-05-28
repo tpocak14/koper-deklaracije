@@ -729,108 +729,12 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                         except Exception as ie:
                             current_app.logger.error(f"BG fulfilled check error: {ie}")
 
-                    # Declaration generation and email send, unchanged logic guarded with try/except
-                    cursor.execute(
-                        """
-                        SELECT order_number, line_items, email_sent_at
-                        FROM orders
-                        WHERE shopify_order_id = %s
-                          AND (shopify_store_domain = %s OR shopify_store_domain IS NULL)
-                        """,
-                        (str(order_id), shop_domain)
+                    # PDF + MK upload + Mandrill pošiljanje prevzame 21:00 batch
+                    # in hourly safety net — NE generiramo PDF ob fulfill webhooku.
+                    current_app.logger.info(
+                        f"Fulfill webhook za {order_id}: fulfilled_at posodobljen; "
+                        f"PDF/Mandrill ob 21:00 batch + MK Zaključeno"
                     )
-                    order_data = cursor.fetchone()
-                    if order_data and not order_data['email_sent_at']:
-                        line_items = json.loads(order_data['line_items']) if isinstance(order_data['line_items'], str) else (order_data['line_items'] or [])
-                        product_ids = [str(item.get('product_id')) for item in line_items if item and item.get('product_id')]
-                        if product_ids:
-                            clear_product_cache()
-                            shopify_details = get_bulk_product_details(product_ids, shop_domain=shop_domain)
-                            items_for_declaration = []
-                            for item in line_items:
-                                if not item or not item.get('product_id'): continue
-                                details = shopify_details.get(str(item.get('product_id')), {})
-                                if (details.get('product_type') or '').strip().lower() != 'parfumi':
-                                    continue
-                                if details.get('image_url'):
-                                    item['image_url'] = details['image_url']
-                                if details.get('product_no') and details.get('proizvajalec_id'):
-                                    items_for_declaration.append({
-                                        'title': item.get('title'),
-                                        'product_no': details['product_no'],
-                                        'proizvajalec_ime': details['proizvajalec_id'].upper()
-                                    })
-                            if items_for_declaration:
-                                from blueprints.api_routes import _pridobi_podatke_za_deklaracijo, _shrani_deklaracijo_v_bazo
-                                declaration_items, missing, warnings = _pridobi_podatke_za_deklaracijo(items_for_declaration, cursor)
-                                if not missing:
-                                    if _shrani_deklaracijo_v_bazo(order_data['order_number'], declaration_items, cursor):
-                                        try:
-                                            from services.pdf_service import ustvari_pdf
-                                            from services.email_service import send_invoice_email
-                                            cursor.execute(
-                                                "SELECT customer_email, country_code, status_url FROM orders WHERE order_number = %s",
-                                                (order_data['order_number'],)
-                                            )
-                                            order_details = cursor.fetchone()
-                                            if order_details:
-                                                pdf_path, pdf_message = ustvari_pdf(
-                                                    declaration_items,
-                                                    line_items,
-                                                    order_details['country_code'],
-                                                    order_data['order_number']
-                                                )
-                                                if pdf_path:
-                                                    cursor.execute(
-                                                        "UPDATE orders SET pdf_generated_at = NOW() WHERE order_number = %s",
-                                                        (order_data['order_number'],)
-                                                    )
-                                                    current_app.logger.info(
-                                                        f"PDF pripravljen za {order_data['order_number']}; "
-                                                        f"pošiljanje kupcu prek Mandrill safety net (ne SMTP)"
-                                                    )
-                                                    # TEST: samodejno pošlji uradni RAČUN (MK PDF) po fulfilled (adminu)
-                                                    try:
-                                                        from services.mk_service import mk_find_bill_any, mk_is_published, mk_print_bill_pdf
-                                                        bill = mk_find_bill_any(order_data['order_number'])
-                                                        if bill and mk_is_published(bill):
-                                                            found_type = bill.get('_doc_type') or 'sales_bill_domestic'
-                                                            official_pdf = mk_print_bill_pdf(found_type, bill.get('mk_id'))
-                                                            if official_pdf:
-                                                                import tempfile
-                                                                with tempfile.NamedTemporaryFile(suffix=f"_{order_data['order_number']}_invoice.pdf", delete=False) as itmp:
-                                                                    itmp.write(official_pdf)
-                                                                    inv_pdf_path = itmp.name
-                                                                try:
-                                                                    send_invoice_email(
-                                                                        current_app.config.get('ADMIN_EMAIL'),
-                                                                        order_data['order_number'],
-                                                                        inv_pdf_path,
-                                                                        country_code=order_details['country_code'],
-                                                                        status_url=order_details['status_url'],
-                                                                        store_url=f"https://{shop_domain}" if shop_domain else f"https://{current_app.config['SHOP_NAME']}.myshopify.com",
-                                                                        items=line_items,
-                                                                        skip_test_redirect=False
-                                                                    )
-                                                                finally:
-                                                                    try:
-                                                                        if os.path.exists(inv_pdf_path):
-                                                                            os.remove(inv_pdf_path)
-                                                                    except Exception:
-                                                                        pass
-                                                        else:
-                                                            current_app.logger.info(f"Auto invoice: bill not published or not found for order {order_data['order_number']}")
-                                                    except Exception as _ie:
-                                                        current_app.logger.warning(f"Auto send invoice (admin) failed: {_ie}")
-                                                    try:
-                                                        if os.path.exists(pdf_path):
-                                                            os.remove(pdf_path)
-                                                    except Exception:
-                                                        pass
-                                        except Exception as email_err:
-                                            current_app.logger.error(f"Napaka pri generiranju PDF/pošiljanju emaila: {email_err}")
-                                            traceback.print_exc()
-                                        db.commit()
                 except Exception as e:
                     current_app.logger.error(f"Napaka v notranji BG obdelavi fulfilled webhooka: {e}")
                     traceback.print_exc()

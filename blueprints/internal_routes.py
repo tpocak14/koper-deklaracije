@@ -201,23 +201,18 @@ def order_status(order_number: str):
 
 @internal_bp.route('/declaration/send/<path:order_number>', methods=['POST'])
 def declaration_send_mandrill(order_number: str):
-    """Pošlji deklaracijo kupcu prek Mandrill (ročno / app-v2 UI).
+    """Ročno sproži safety-net pipeline (21:00 batch + MK Zaključeno).
 
-    Query: force=1 za ponovno pošiljanje.
+    NE generira PDF neposredno — uporabi process_one().
     """
     if not _is_authorized():
         return _unauthorized()
 
-    import json as _json
-    from blueprints.api_routes import _pridobi_deklaracijo_iz_baze
-    from services.pdf_service import ustvari_pdf
-    from services.declaration_safety_net import send_declaration_email
-    from services.shopify_service import clear_product_cache, get_bulk_product_details
+    from services.declaration_safety_net import process_one
 
     on = (order_number or '').strip()
     if not on:
         return jsonify({'ok': False, 'error': 'missing order_number'}), 400
-    force = request.args.get('force', '').strip().lower() in ('1', 'true', 'yes')
 
     db = get_db()
     c = db.cursor()
@@ -230,86 +225,34 @@ def declaration_send_mandrill(order_number: str):
         if not order:
             return jsonify({'ok': False, 'error': 'order_not_found'}), 404
 
-        order_number_db = order['order_number']
-        declaration_data = _pridobi_deklaracijo_iz_baze(order_number_db, c)
-        if not declaration_data:
-            return jsonify({'ok': False, 'error': 'no_declarations'}), 400
-
-        declaration_items = []
-        for item in declaration_data:
-            rok = item['rok_uporabe']
-            if hasattr(rok, 'strftime'):
-                rok_s = rok.strftime('%d.%m.%Y')
-            else:
-                rok_s = str(rok) if rok else None
-            declaration_items.append({
-                'title': f"{item['product_no']} - {item['proizvajalec_ime']}",
-                'product_no': item['product_no'],
-                'proizvajalec_ime': item['proizvajalec_ime'],
-                'sestava_inci': item['sestava_inci'],
-                'rok_uporabe': rok_s,
-                'serijska_stevilka': item['serijska_stevilka'] or 'N/A',
-            })
-
-        line_items_raw = order.get('line_items', '[]')
-        line_items = (
-            _json.loads(line_items_raw)
-            if isinstance(line_items_raw, str)
-            else (line_items_raw or [])
-        )
-        product_ids = [str(i['product_id']) for i in line_items if i and i.get('product_id')]
-        clear_product_cache()
-        shopify_details = get_bulk_product_details(product_ids)
-        email_line_items = []
-        for item in line_items:
-            if not item or not item.get('product_id'):
-                continue
-            details = shopify_details.get(str(item['product_id']), {})
-            try:
-                price = float(item.get('price', 0.0))
-            except (ValueError, TypeError):
-                price = 0.0
-            email_line_items.append({
-                'title': item.get('title', 'N/A'),
-                'quantity': item.get('quantity', 1),
-                'price': price,
-                'image_url': details.get(
-                    'image_url',
-                    'https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-image_large.png',
-                ),
-            })
-
-        pdf_path, pdf_msg = ustvari_pdf(
-            declaration_items, email_line_items, order['country_code'], order_number_db, []
-        )
-        if not pdf_path:
-            return jsonify({'ok': False, 'error': pdf_msg}), 500
-
         order_dict = dict(order) if not isinstance(order, dict) else order
-        send_res = send_declaration_email(
-            order_dict,
-            pdf_path,
-            declaration_items,
-            email_line_items,
-            c,
-            force=force,
-            allow_smtp_fallback=True,
-        )
+        result = process_one(order_dict, c)
         db.commit()
 
-        if send_res.get('success'):
+        action = result.get('action', 'error')
+        if action == 'uploaded_and_mandrill' and result.get('mandrill_message_id'):
             return jsonify({
                 'ok': True,
-                'channel': send_res.get('channel', 'mandrill'),
-                'message_id': send_res.get('message_id'),
-                'status': send_res.get('status'),
-                'template': send_res.get('template'),
-                'order_number': order_number_db,
+                'action': action,
+                'channel': 'mandrill',
+                'message_id': result.get('mandrill_message_id'),
+                'order_number': order_dict.get('order_number'),
+                'reason': result.get('reason'),
             })
+
+        if action in ('waiting_2100_batch', 'uploaded_mk_only'):
+            return jsonify({
+                'ok': False,
+                'action': action,
+                'error': result.get('reason') or action,
+                'order_number': order_dict.get('order_number'),
+            }), 409
+
         return jsonify({
             'ok': False,
-            'error': send_res.get('reason', 'send_failed'),
-            'order_number': order_number_db,
+            'action': action,
+            'error': result.get('reason') or 'send_failed',
+            'order_number': order_dict.get('order_number'),
         }), 500
     except Exception as e:
         db.rollback()
