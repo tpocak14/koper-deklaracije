@@ -4536,52 +4536,32 @@ def sync_new_perfumes():
 
 @api_bp.route('/sync-names', methods=['POST'])
 def sync_perfume_names():
-    """Sinhronizira ime_parfuma v lokalni bazi z vrednostmi iz Shopify."""
-    db = get_db()
-    cursor = db.cursor()
-    try:
-        current_app.logger.info("Starting perfume name sync...")
-        shopify_products = get_all_products_for_name_sync()
-        if shopify_products is None:
-            return jsonify({"error": "Napaka pri pridobivanju podatkov iz Shopify."}), 500
-        
-        updated_count = 0
-        for product in shopify_products:
-            vendor = product.get('vendor')
-            fragrance = product.get('product_fragrance', {}).get('value')
-            product_no = product.get('product_no', {}).get('value')
-            proizvajalec_id_val = product.get('proizvajalec_id', {}).get('value')
+    """Sinhronizira ime_parfuma iz Shopify (custom.inspiration) v lokalno bazo."""
+    data = request.get_json(silent=True) or {}
+    shop_domain = (data.get('shop_domain') or DEFAULT_SYNC_STORE).strip()
+    dry_run = bool(data.get('dry_run'))
 
-            if not all([vendor, fragrance, product_no, proizvajalec_id_val]):
-                continue
+    current_app.logger.info(
+        "Starting perfume name sync from Shopify inspiration (shop=%s)...",
+        shop_domain,
+    )
 
-            new_name = f"{vendor} - {fragrance}"
-            
-            cursor.execute("""
-                UPDATE parfumi p
-                SET ime_parfuma = %s
-                FROM proizvajalci pr
-                WHERE p.proizvajalec_id = pr.id
-                  AND p.product_no = %s
-                  AND pr.ime = %s
-                  AND p.ime_parfuma != %s
-            """, (new_name, product_no, proizvajalec_id_val, new_name))
-            
-            if cursor.rowcount > 0:
-                updated_count += cursor.rowcount
-        
-        db.commit()
-        message = f"Sinhronizacija imen končana. Posodobljenih {updated_count} imen."
-        current_app.logger.info(message)
-        return jsonify({"message": message})
+    result = sync_parfumi_from_shopify(
+        shop_domain,
+        dry_run=dry_run,
+        update_existing=True,
+    )
+    if result.get("error") and not result.get("ok"):
+        return jsonify({"error": result["error"]}), 400
 
-    except Exception as e:
-        db.rollback()
-        current_app.logger.error(f"Napaka pri sinhronizaciji imen: {e}")
-        traceback.print_exc()
-        return jsonify({"error": "Prišlo je do napake na strežniku."}), 500
-    finally:
-        cursor.close()
+    message = (
+        f"Sinhronizacija imen končana ({result.get('shop_domain')}). "
+        f"Posodobljenih: {result.get('updated', 0)}, "
+        f"preskočenih: {result.get('skipped', 0)}."
+        f"{ ' (dry run)' if dry_run else '' }"
+    )
+    current_app.logger.info(message)
+    return jsonify({"message": message, "result": result})
 
 def get_all_shopify_products_with_metafields():
     """Pridobi vse produkte in njihove ključne metafielde/tage v enem samem učinkovitem klicu."""
@@ -4702,18 +4682,23 @@ def sync_new_perfumes_endpoint():
     shop_domain = (data.get('shop_domain') or DEFAULT_SYNC_STORE).strip()
     dry_run = bool(data.get('dry_run'))
     update_existing = bool(data.get('update_existing'))
+    product_ids = data.get('product_ids') or None
+    if product_ids is not None and not isinstance(product_ids, list):
+        return jsonify({"error": "product_ids mora biti seznam ID-jev Shopify izdelkov."}), 400
 
     current_app.logger.info(
-        "Starting perfume sync from Shopify (shop=%s, dry_run=%s, update_existing=%s)...",
+        "Starting perfume sync from Shopify (shop=%s, dry_run=%s, update_existing=%s, targeted=%s)...",
         shop_domain,
         dry_run,
         update_existing,
+        bool(product_ids),
     )
 
     result = sync_parfumi_from_shopify(
         shop_domain,
         dry_run=dry_run,
         update_existing=update_existing,
+        product_ids=product_ids,
     )
     if result.get("error") and not result.get("ok"):
         return jsonify({"error": result["error"]}), 400

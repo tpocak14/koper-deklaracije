@@ -1844,7 +1844,7 @@
                                             <p class="text-sm text-yellow-700">Iz Shopify-ja</p>
                                         </div>
                                     </div>
-                                    <p class="text-sm text-yellow-800 mb-4 leading-relaxed">Sinhronizira imena parfumov na podlagi 'vendor' in 'product_fragrance' metafield-ov.</p>
+                                    <p class="text-sm text-yellow-800 mb-4 leading-relaxed">Posodobi imena parfumov iz Shopify metafielda <code>custom.inspiration</code> (ne več vendor + fragrance).</p>
                                     <button class="w-full inline-flex items-center justify-center px-4 py-3 bg-yellow-600 border border-transparent rounded-lg font-medium text-white hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 transition-all duration-200 transform hover:scale-105" id="sync-names-btn">
                                         <i class="bi bi-pencil-square mr-2"></i> Sinhroniziraj imena
                                     </button>
@@ -2745,10 +2745,10 @@
                     <span id="sync-parfumi-progress-text">Sinhroniziram izdelke iz Shopify-ja… To lahko traja več minut.</span>
                 </div>
                 <div class="text-[11px] text-gray-500 bg-gray-50 rounded-md p-2.5 leading-relaxed">
-                    Sinhronizacija prebere vse izdelke iz Shopify-ja in posodobi tabelo <code class="px-1 bg-white rounded">parfumi</code>.
-                    Kriteriji: metafieldi <code class="px-1 bg-white rounded">custom.product_no</code>,
-                    <code class="px-1 bg-white rounded">custom.proizvajalec_id</code> in
-                    <code class="px-1 bg-white rounded">custom.product_fragrance_</code>.
+                Sinhronizacija prebere izdelke iz Shopify-ja in doda manjkajoče v tabelo <code class="px-1 bg-white rounded">parfumi</code>.
+                Ime: <code class="px-1 bg-white rounded">custom.inspiration</code>,
+                proizvajalec: <code class="px-1 bg-white rounded">custom.proizvajalec_id</code>,
+                INCI: <code class="px-1 bg-white rounded">my_fields.sestava_po_inci</code>.
                 </div>
                 <div id="sync-parfumi-result" class="hidden"></div>
             </div>

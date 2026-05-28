@@ -1,7 +1,8 @@
-"""Sinhronizacija parfumov iz Shopify-ja v lokalno bazo (enako kot app-v2)."""
+"""Sinhronizacija parfumov iz Shopify-ja v lokalno bazo."""
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any
 
@@ -16,6 +17,12 @@ from services.shopify_service import (
 )
 
 DEFAULT_SYNC_STORE = "amour-parfums-2.myshopify.com"
+
+INCI_METAFIELD_KEYS = (
+    "custom.sestava_inci",
+    "my_fields.sestava_po_inci",
+    "custom.sestavine_inci",
+)
 
 FRAGRANCE_KEYS = (
     "product_fragrance_",
@@ -38,7 +45,7 @@ def _normalize_shop_domain(shop_domain: str | None) -> str:
     return sd
 
 
-def _parse_product_node(node: dict[str, Any]) -> dict[str, Any]:
+def _metafields_map(node: dict[str, Any]) -> dict[str, str]:
     mf_map: dict[str, str] = {}
     for edge in (node.get("metafields") or {}).get("edges") or []:
         m = edge.get("node") or {}
@@ -46,13 +53,24 @@ def _parse_product_node(node: dict[str, Any]) -> dict[str, Any]:
         key = m.get("key")
         if ns and key:
             mf_map[f"{ns}.{key}"] = m.get("value") or ""
+    return mf_map
 
-    product_no = (mf_map.get("custom.product_no") or "").strip()
-    proizvajalec_ime = (mf_map.get("custom.proizvajalec_id") or "").strip()
-    sestava_inci = (mf_map.get("custom.sestava_inci") or "").strip()
-    na_zalogi_raw = (mf_map.get("custom.na_zalogi") or "").strip().lower()
-    na_zalogi = na_zalogi_raw in ("true", "1")
 
+def _resolve_inci(mf_map: dict[str, str]) -> str | None:
+    for key in INCI_METAFIELD_KEYS:
+        val = (mf_map.get(key) or "").strip()
+        if val:
+            return val
+    return None
+
+
+def _resolve_ime_parfuma(mf_map: dict[str, str], node: dict[str, Any]) -> str | None:
+    """Ime parfuma: custom.inspiration (celotno, brez pomišljaja med vendorjem in imenom)."""
+    inspiration = (mf_map.get("custom.inspiration") or "").strip()
+    if inspiration:
+        return inspiration
+
+    dekl_vendor = (mf_map.get("custom.deklaracije_vendor") or "").strip()
     fragrance = ""
     for key in FRAGRANCE_KEYS:
         val = (mf_map.get(f"custom.{key}") or "").strip()
@@ -60,19 +78,50 @@ def _parse_product_node(node: dict[str, Any]) -> dict[str, Any]:
             fragrance = val
             break
 
-    vendor = (node.get("vendor") or "").strip()
-    if not proizvajalec_ime and vendor:
-        proizvajalec_ime = vendor
+    if dekl_vendor and fragrance:
+        return f"{dekl_vendor} - {fragrance}"
+
+    shopify_vendor = (node.get("vendor") or "").strip()
+    if shopify_vendor and fragrance:
+        return f"{shopify_vendor} - {fragrance}"
+
+    return None
+
+
+def parse_product_node(node: dict[str, Any]) -> dict[str, Any]:
+    mf_map = _metafields_map(node)
+
+    product_no = (mf_map.get("custom.product_no") or "").strip()
+    proizvajalec_ime = (mf_map.get("custom.proizvajalec_id") or "").strip()
+    deklaracije_vendor = (mf_map.get("custom.deklaracije_vendor") or "").strip() or None
+    ime_parfuma = _resolve_ime_parfuma(mf_map, node)
+    sestava_inci = _resolve_inci(mf_map)
+
+    na_zalogi_raw = (mf_map.get("custom.na_zalogi") or "").strip().lower()
+    na_zalogi = na_zalogi_raw in ("true", "1")
 
     return {
         "product_id": node.get("id") or "",
-        "vendor": vendor,
+        "shopify_vendor": (node.get("vendor") or "").strip(),
+        "deklaracije_vendor": deklaracije_vendor,
         "product_no": product_no or None,
         "proizvajalec_ime": proizvajalec_ime or None,
-        "fragrance": fragrance or None,
-        "sestava_inci": sestava_inci or None,
+        "ime_parfuma": ime_parfuma,
+        "sestava_inci": sestava_inci,
         "na_zalogi": na_zalogi,
     }
+
+
+def _parse_product_node(node: dict[str, Any]) -> dict[str, Any]:
+    return parse_product_node(node)
+
+
+def _product_gid(product_id: str) -> str:
+    pid = str(product_id).strip()
+    if pid.startswith("gid://"):
+        return pid
+    numeric = re.sub(r"\D", "", pid)
+    return f"gid://shopify/Product/{numeric}"
 
 
 def _fetch_products(shop_domain: str) -> tuple[list[dict[str, Any]], list[str]]:
@@ -124,9 +173,7 @@ def _fetch_products(shop_domain: str) -> tuple[list[dict[str, Any]], list[str]]:
 
         data = response.json()
         if data.get("errors"):
-            errors.append(
-                f"Shopify GraphQL errors: {str(data['errors'])[:400]}"
-            )
+            errors.append(f"Shopify GraphQL errors: {str(data['errors'])[:400]}")
             break
 
         products_data = (data.get("data") or {}).get("products") or {}
@@ -145,20 +192,77 @@ def _fetch_products(shop_domain: str) -> tuple[list[dict[str, Any]], list[str]]:
     return products, errors
 
 
+def _fetch_products_by_ids(
+    shop_domain: str, product_ids: list[str]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    products: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for raw_id in product_ids:
+        gid = _product_gid(raw_id)
+        query = f"""{{
+          product(id: "{gid}") {{
+            id
+            vendor
+            metafields(first: 50) {{
+              edges {{
+                node {{ namespace key value }}
+              }}
+            }}
+          }}
+        }}"""
+        try:
+            response = requests.post(
+                _get_api_url(shop_domain=shop_domain),
+                json={"query": query},
+                headers=_get_shopify_headers(shop_domain),
+                timeout=60,
+            )
+        except Exception as exc:
+            errors.append(f"Network napaka za {raw_id}: {exc}")
+            continue
+
+        if response.status_code != 200:
+            errors.append(f"Shopify {response.status_code} za {raw_id}")
+            continue
+
+        data = response.json()
+        if data.get("errors"):
+            errors.append(f"GraphQL napaka za {raw_id}: {str(data['errors'])[:200]}")
+            continue
+
+        node = (data.get("data") or {}).get("product")
+        if not node:
+            errors.append(f"Izdelek {raw_id} ni najden v Shopify")
+            continue
+
+        products.append(_parse_product_node(node))
+
+    return products, errors
+
+
 def sync_parfumi_from_shopify(
     shop_domain: str,
     *,
     dry_run: bool = False,
     update_existing: bool = False,
+    product_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Sinhronizira parfume iz izbrane Shopify trgovine v lokalno bazo.
 
-    Privzeto samo doda manjkajoče parfume (update_existing=False).
-    Posodabljanje obstoječih je opt-in.
+    - ime_parfuma: custom.inspiration (ne vendor + fragrance)
+    - proizvajalec: custom.proizvajalec_id (ključ v bazi)
+    - INCI: custom.sestava_inci ali my_fields.sestava_po_inci
+
+    Privzeto samo doda manjkajoče (update_existing=False).
+    Če je podan product_ids, posodobi ime+INCI tudi na obstoječih.
     """
     t0 = time.time()
     normalized = _normalize_shop_domain(shop_domain) or DEFAULT_SYNC_STORE
+    targeted = bool(product_ids)
+    if targeted:
+        update_existing = True
 
     if not normalized.endswith(".myshopify.com"):
         return {
@@ -189,9 +293,14 @@ def sync_parfumi_from_shopify(
         "duration_ms": 0,
         "dry_run": dry_run,
         "update_existing": update_existing,
+        "targeted_product_ids": product_ids or [],
     }
 
-    products, fetch_errors = _fetch_products(normalized)
+    if product_ids:
+        products, fetch_errors = _fetch_products_by_ids(normalized, product_ids)
+    else:
+        products, fetch_errors = _fetch_products(normalized)
+
     result["fetched"] = len(products)
     if fetch_errors:
         result["errors"] += len(fetch_errors)
@@ -213,27 +322,25 @@ def sync_parfumi_from_shopify(
 
         for product in products:
             try:
-                vendor = product.get("vendor") or ""
                 product_no = product.get("product_no")
                 proizvajalec_ime = product.get("proizvajalec_ime")
-                fragrance = product.get("fragrance")
+                new_name = product.get("ime_parfuma")
+                sestava_inci = product.get("sestava_inci")
+                na_zalogi = bool(product.get("na_zalogi"))
 
-                if not vendor or not product_no or not proizvajalec_ime or not fragrance:
+                if not product_no or not proizvajalec_ime or not new_name:
                     result["skipped"] += 1
                     if len(result["skipped_samples"]) < 20:
                         missing = []
-                        if not vendor:
-                            missing.append("vendor")
                         if not product_no:
                             missing.append("product_no")
                         if not proizvajalec_ime:
-                            missing.append("proizvajalec")
-                        if not fragrance:
-                            missing.append("fragrance")
+                            missing.append("proizvajalec_id")
+                        if not new_name:
+                            missing.append("inspiration")
                         result["skipped_samples"].append(
                             {
                                 "product_id": product.get("product_id"),
-                                "vendor": vendor or "(?)",
                                 "product_no": product_no,
                                 "reason": f"Manjka: {', '.join(missing)}",
                             }
@@ -250,7 +357,6 @@ def sync_parfumi_from_shopify(
                             result["skipped_samples"].append(
                                 {
                                     "product_id": product.get("product_id"),
-                                    "vendor": vendor,
                                     "product_no": product_no,
                                     "reason": (
                                         f"Proizvajalec '{proizvajalec_ime}' ne obstaja "
@@ -279,10 +385,6 @@ def sync_parfumi_from_shopify(
                     proizvajalec_id = row["id"] if isinstance(row, dict) else row[0]
                     proizvajalec_cache[cache_key] = proizvajalec_id
 
-                new_name = f"{vendor} - {fragrance}"
-                sestava_inci = product.get("sestava_inci")
-                na_zalogi = bool(product.get("na_zalogi"))
-
                 cursor.execute(
                     """
                     SELECT id, ime_parfuma, sestava_inci, na_zalogi
@@ -300,7 +402,6 @@ def sync_parfumi_from_shopify(
                             result["skipped_samples"].append(
                                 {
                                     "product_id": product.get("product_id"),
-                                    "vendor": vendor,
                                     "product_no": product_no,
                                     "reason": "Parfum že obstaja (preskočeno)",
                                 }
@@ -321,7 +422,8 @@ def sync_parfumi_from_shopify(
                     if sestava_inci and existing_inci != sestava_inci:
                         updates.append("sestava_inci = %s")
                         params.append(sestava_inci)
-                    if existing_na_zalogi != na_zalogi:
+                    # na_zalogi samo pri polni sinhronizaciji, ne pri ciljnem uvozu
+                    if not targeted and existing_na_zalogi != na_zalogi:
                         updates.append("na_zalogi = %s")
                         params.append(na_zalogi)
 
@@ -344,7 +446,13 @@ def sync_parfumi_from_shopify(
                             VALUES (%s, %s, %s, %s, %s, TRUE)
                             ON CONFLICT (product_no, proizvajalec_id) DO NOTHING
                             """,
-                            (product_no, proizvajalec_id, new_name, sestava_inci, na_zalogi),
+                            (
+                                product_no,
+                                proizvajalec_id,
+                                new_name,
+                                sestava_inci,
+                                na_zalogi if not targeted else False,
+                            ),
                         )
                         if cursor.rowcount > 0:
                             cursor.execute(
