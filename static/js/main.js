@@ -3012,45 +3012,280 @@ let narocilaAbortController = null;
         });
     }
 
-    // Gumb za sinhronizacijo novih parfumov iz Shopify-ja
+    // Gumb za sinhronizacijo parfumov iz Shopify-ja (modal kot app-v2)
+    const SYNC_PARFUMI_DEFAULT_STORE = 'amour-parfums-2.myshopify.com';
+    function escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
     const syncNewPerfumesBtn = document.getElementById('sync-new-perfumes-btn');
-    if (syncNewPerfumesBtn) {
-        syncNewPerfumesBtn.addEventListener('click', async () => {
-            showToast('Začenjam sinhronizacijo novih parfumov iz Shopify... To lahko traja nekaj časa.', 'info');
-            setButtonLoading(syncNewPerfumesBtn, true, 'Sinhroniziram...');
+    const syncParfumiModal = document.getElementById('sync-parfumi-modal');
+    const syncParfumiStoresEl = document.getElementById('sync-parfumi-stores');
+    const syncParfumiDryRunEl = document.getElementById('sync-parfumi-dry-run');
+    const syncParfumiResultEl = document.getElementById('sync-parfumi-result');
+    const syncParfumiStartBtn = document.getElementById('sync-parfumi-start');
+    const syncParfumiStartLabel = document.getElementById('sync-parfumi-start-label');
+    const syncParfumiCancelBtn = document.getElementById('sync-parfumi-cancel');
+    const syncParfumiCloseBtn = document.getElementById('sync-parfumi-modal-close');
+    let syncParfumiSelectedStore = SYNC_PARFUMI_DEFAULT_STORE;
+    let syncParfumiRunning = false;
 
-            try {
-                const response = await fetch('/api/sync-new-perfumes', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
+    function setSyncParfumiModalOpen(open) {
+        if (!syncParfumiModal) return;
+        if (open) {
+            syncParfumiModal.classList.remove('hidden');
+            syncParfumiModal.classList.add('flex');
+        } else {
+            syncParfumiModal.classList.add('hidden');
+            syncParfumiModal.classList.remove('flex');
+        }
+    }
+
+    function setSyncParfumiBusy(busy) {
+        syncParfumiRunning = busy;
+        if (syncParfumiStartBtn) syncParfumiStartBtn.disabled = busy;
+        if (syncParfumiCancelBtn) syncParfumiCancelBtn.disabled = busy;
+        if (syncParfumiCloseBtn) syncParfumiCloseBtn.disabled = busy;
+        if (syncParfumiDryRunEl) syncParfumiDryRunEl.disabled = busy;
+        if (syncParfumiStoresEl) {
+            syncParfumiStoresEl.querySelectorAll('input[type="radio"]').forEach(r => {
+                r.disabled = busy;
+            });
+        }
+        if (syncParfumiStartLabel) {
+            syncParfumiStartLabel.textContent = busy ? 'Sinhroniziram...' : (
+                syncParfumiDryRunEl?.checked ? 'Simuliraj' : 'Sinhroniziraj'
+            );
+        }
+    }
+
+    function renderSyncParfumiResult(result, errorMsg) {
+        if (!syncParfumiResultEl) return;
+        syncParfumiResultEl.classList.remove('hidden');
+
+        if (errorMsg) {
+            syncParfumiResultEl.innerHTML = `
+                <div class="text-sm p-3 rounded-md bg-red-50 text-red-800 border border-red-200">
+                    <div class="font-semibold mb-1">Napaka</div>
+                    <div class="text-xs">${escapeHtml(errorMsg)}</div>
+                </div>`;
+            return;
+        }
+
+        const r = result || {};
+        const skippedSamples = (r.skipped_samples || []).slice(0, 20);
+        const errorMessages = (r.error_messages || []).slice(0, 20);
+        const durationSec = ((r.duration_ms || 0) / 1000).toFixed(1);
+
+        let skippedHtml = '';
+        if (skippedSamples.length) {
+            skippedHtml = `
+                <details class="text-xs mt-2">
+                    <summary class="cursor-pointer font-medium text-amber-700">
+                        Preskočeni primeri (${skippedSamples.length}${r.skipped > skippedSamples.length ? ` od ${r.skipped}` : ''})
+                    </summary>
+                    <ul class="mt-1.5 space-y-1 max-h-32 overflow-y-auto pl-2">
+                        ${skippedSamples.map(s => `
+                            <li class="text-amber-800 text-[10px] flex justify-between gap-2">
+                                <span class="font-mono truncate">${escapeHtml((s.vendor || '') + ' ' + (s.product_no || ''))}</span>
+                                <span class="opacity-70">${escapeHtml(s.reason || '')}</span>
+                            </li>
+                        `).join('')}
+                    </ul>
+                </details>`;
+        }
+
+        let errorsHtml = '';
+        if (errorMessages.length) {
+            errorsHtml = `
+                <details class="text-xs mt-2">
+                    <summary class="cursor-pointer font-medium text-red-700">Napake (${errorMessages.length})</summary>
+                    <ul class="mt-1.5 space-y-1 max-h-32 overflow-y-auto pl-2">
+                        ${errorMessages.map(m => `<li class="text-red-700 font-mono text-[10px]">${escapeHtml(m)}</li>`).join('')}
+                    </ul>
+                </details>`;
+        }
+
+        syncParfumiResultEl.innerHTML = `
+            <div class="text-sm rounded-md border border-emerald-200 bg-emerald-50 p-3 space-y-2">
+                <div class="flex items-baseline justify-between">
+                    <span class="font-semibold text-emerald-900">Sinhronizacija končana</span>
+                    <span class="text-[11px] text-emerald-700 tabular-nums">${durationSec}s</span>
+                </div>
+                <div class="grid grid-cols-3 gap-2 text-xs">
+                    <div class="bg-white/60 border border-emerald-100 rounded p-1.5">
+                        <div class="text-[9px] uppercase tracking-wide text-gray-500 font-semibold">Pridobljenih</div>
+                        <div class="text-base font-bold tabular-nums">${r.fetched ?? 0}</div>
+                    </div>
+                    <div class="bg-white/60 border border-emerald-100 rounded p-1.5">
+                        <div class="text-[9px] uppercase tracking-wide text-gray-500 font-semibold">Dodanih</div>
+                        <div class="text-base font-bold tabular-nums text-emerald-800">${r.added ?? 0}</div>
+                    </div>
+                    <div class="bg-white/60 border border-emerald-100 rounded p-1.5">
+                        <div class="text-[9px] uppercase tracking-wide text-gray-500 font-semibold">Posodobljenih</div>
+                        <div class="text-base font-bold tabular-nums text-blue-800">${r.updated ?? 0}</div>
+                    </div>
+                    <div class="bg-white/60 border border-emerald-100 rounded p-1.5">
+                        <div class="text-[9px] uppercase tracking-wide text-gray-500 font-semibold">Preskočenih</div>
+                        <div class="text-base font-bold tabular-nums text-amber-800">${r.skipped ?? 0}</div>
+                    </div>
+                    <div class="bg-white/60 border border-emerald-100 rounded p-1.5">
+                        <div class="text-[9px] uppercase tracking-wide text-gray-500 font-semibold">Napake</div>
+                        <div class="text-base font-bold tabular-nums text-red-800">${r.errors ?? 0}</div>
+                    </div>
+                    <div class="bg-white/60 border border-emerald-100 rounded p-1.5">
+                        <div class="text-[9px] uppercase tracking-wide text-gray-500 font-semibold">Trgovina</div>
+                        <div class="font-mono text-[10px] truncate">${escapeHtml(r.shop_domain || '')}</div>
+                    </div>
+                </div>
+                ${errorsHtml}
+                ${skippedHtml}
+            </div>`;
+    }
+
+    async function loadSyncParfumiStores() {
+        if (!syncParfumiStoresEl) return;
+        syncParfumiStoresEl.innerHTML = '<p class="text-sm text-gray-500">Nalagam trgovine...</p>';
+        try {
+            const res = await fetch('/api/shopify-stores');
+            const data = await res.json().catch(() => ({}));
+            const stores = (res.ok && data.success) ? (data.data || []) : [];
+            if (!stores.length) {
+                syncParfumiStoresEl.innerHTML = '<p class="text-sm text-red-600">Ni aktivnih Shopify trgovin.</p>';
+                syncParfumiSelectedStore = '';
+                return;
+            }
+
+            const defaultStore = stores.find(s => s.is_sync_default)?.shop_domain
+                || stores.find(s => s.shop_domain === SYNC_PARFUMI_DEFAULT_STORE)?.shop_domain
+                || stores[0].shop_domain;
+            syncParfumiSelectedStore = defaultStore;
+
+            syncParfumiStoresEl.innerHTML = stores.map(s => {
+                const checked = s.shop_domain === defaultStore ? 'checked' : '';
+                const inactive = s.is_active === false ? '<span class="text-[10px] text-amber-700">neaktivna</span>' : '';
+                const defaultBadge = s.is_sync_default
+                    ? '<div class="text-[10px] text-emerald-700 font-medium">★ Privzeto (master B2C)</div>'
+                    : '';
+                return `
+                    <label class="flex items-center gap-2.5 px-3 py-2 rounded-md border cursor-pointer transition-colors border-gray-200 hover:bg-gray-50 has-[:checked]:border-emerald-500 has-[:checked]:bg-emerald-50">
+                        <input type="radio" name="sync-parfumi-shop" value="${escapeHtml(s.shop_domain)}" ${checked} class="text-emerald-600 focus:ring-emerald-500">
+                        <div class="flex-1">
+                            <div class="font-mono text-sm">${escapeHtml(s.shop_domain)}</div>
+                            ${defaultBadge}
+                        </div>
+                        ${inactive}
+                    </label>`;
+            }).join('');
+
+            syncParfumiStoresEl.querySelectorAll('input[name="sync-parfumi-shop"]').forEach(radio => {
+                radio.addEventListener('change', () => {
+                    if (radio.checked) syncParfumiSelectedStore = radio.value;
                 });
-                
-                if (!response.ok) {
-                    let errorMsg = 'Neznana napaka';
-                    try {
-                        const result = await response.json();
-                        errorMsg = result.error || 'Neznana napaka';
-                    } catch (e) {
-                        errorMsg = `Strežnik je vrnil napako ${response.status}.`;
-                    }
-                    throw new Error(errorMsg);
-                }
+            });
+        } catch (err) {
+            syncParfumiStoresEl.innerHTML = `<p class="text-sm text-red-600">Napaka pri nalaganju trgovin: ${escapeHtml(err.message || String(err))}</p>`;
+            syncParfumiSelectedStore = '';
+        }
+    }
 
-                const result = await response.json();
-                showToast(result.message, 'success');
-                
-                // Osvežimo seznam proizvajalcev in parfumov
+    function resetSyncParfumiModal() {
+        if (syncParfumiResultEl) {
+            syncParfumiResultEl.classList.add('hidden');
+            syncParfumiResultEl.innerHTML = '';
+        }
+        if (syncParfumiDryRunEl) syncParfumiDryRunEl.checked = false;
+        if (syncParfumiStartLabel) syncParfumiStartLabel.textContent = 'Sinhroniziraj';
+        setSyncParfumiBusy(false);
+    }
+
+    async function openSyncParfumiModal() {
+        resetSyncParfumiModal();
+        setSyncParfumiModalOpen(true);
+        await loadSyncParfumiStores();
+    }
+
+    async function runSyncParfumi() {
+        if (!syncParfumiSelectedStore) {
+            showToast('Izberi Shopify trgovino.', 'warning');
+            return;
+        }
+        const dryRun = !!syncParfumiDryRunEl?.checked;
+        setSyncParfumiBusy(true);
+        if (syncParfumiResultEl) {
+            syncParfumiResultEl.classList.add('hidden');
+            syncParfumiResultEl.innerHTML = '';
+        }
+
+        try {
+            const response = await fetch('/api/sync-new-perfumes', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    shop_domain: syncParfumiSelectedStore,
+                    dry_run: dryRun,
+                }),
+            });
+
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(payload.error || `Strežnik je vrnil napako ${response.status}.`);
+            }
+
+            renderSyncParfumiResult(payload.result, null);
+            showToast(payload.message || 'Sinhronizacija končana.', 'success');
+
+            if (!dryRun) {
                 await loadProizvajalci();
-                if (searchProizvajalecSelect.value) {
-                    const event = new Event('change');
-                    searchProizvajalecSelect.dispatchEvent(event);
+                if (searchProizvajalecSelect?.value) {
+                    searchProizvajalecSelect.dispatchEvent(new Event('change'));
                 }
+            }
+        } catch (error) {
+            console.error('Napaka pri sinhronizaciji parfumov:', error);
+            renderSyncParfumiResult(null, error.message);
+            showToast(`Napaka pri sinhronizaciji: ${error.message}`, 'danger');
+        } finally {
+            setSyncParfumiBusy(false);
+            if (syncParfumiStartLabel) {
+                syncParfumiStartLabel.textContent = syncParfumiDryRunEl?.checked ? 'Simuliraj' : 'Ponovi';
+            }
+        }
+    }
 
-            } catch (error) {
-                console.error('Napaka pri sinhronizaciji novih parfumov:', error);
-                showToast(`Napaka pri sinhronizaciji: ${error.message}`, 'danger');
-            } finally {
-                setButtonLoading(syncNewPerfumesBtn, false);
+    if (syncNewPerfumesBtn) {
+        syncNewPerfumesBtn.addEventListener('click', () => {
+            openSyncParfumiModal();
+        });
+    }
+    if (syncParfumiStartBtn) {
+        syncParfumiStartBtn.addEventListener('click', runSyncParfumi);
+    }
+    if (syncParfumiCancelBtn) {
+        syncParfumiCancelBtn.addEventListener('click', () => {
+            if (!syncParfumiRunning) setSyncParfumiModalOpen(false);
+        });
+    }
+    if (syncParfumiCloseBtn) {
+        syncParfumiCloseBtn.addEventListener('click', () => {
+            if (!syncParfumiRunning) setSyncParfumiModalOpen(false);
+        });
+    }
+    if (syncParfumiModal) {
+        syncParfumiModal.addEventListener('click', (e) => {
+            if (e.target === syncParfumiModal && !syncParfumiRunning) {
+                setSyncParfumiModalOpen(false);
+            }
+        });
+    }
+    if (syncParfumiDryRunEl) {
+        syncParfumiDryRunEl.addEventListener('change', () => {
+            if (!syncParfumiRunning && syncParfumiStartLabel) {
+                syncParfumiStartLabel.textContent = syncParfumiDryRunEl.checked ? 'Simuliraj' : 'Sinhroniziraj';
             }
         });
     }

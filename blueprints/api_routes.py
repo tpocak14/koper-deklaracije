@@ -25,6 +25,10 @@ from services.pdf_service import ustvari_pdf, generate_purchase_order_pdf
 from services.email_service import poslji_email_s_pdf, poslji_obvestilo_o_napaki, send_new_user_welcome_email, send_purchase_order_admin_email
 from services.excel_service import generate_purchase_order_excel
 from services.search_service import normalize_query, upsert_synonym, upsert_inspo_target
+from services.sync_parfumi_service import (
+    DEFAULT_SYNC_STORE,
+    sync_parfumi_from_shopify,
+)
 import io
 from openpyxl import Workbook
 import traceback
@@ -4691,98 +4695,32 @@ def sync_stock_status():
 
 @api_bp.route('/sync-new-perfumes', methods=['POST'])
 def sync_new_perfumes_endpoint():
-    """Uvozi nove parfume iz Shopify-ja v lokalno bazo (ustvari manjkajoče zapise)."""
-    db = get_db()
-    cursor = db.cursor()
-    try:
-        current_app.logger.info("Starting sync of NEW perfumes from Shopify...")
-        shopify_products = get_all_products_for_name_sync()
-        if shopify_products is None:
-            return jsonify({"error": "Napaka pri pridobivanju podatkov iz Shopify."}), 500
+    """Sinhronizira parfume iz izbrane Shopify trgovine (enako kot app-v2 /seznami)."""
+    data = request.get_json(silent=True) or {}
+    shop_domain = (data.get('shop_domain') or DEFAULT_SYNC_STORE).strip()
+    dry_run = bool(data.get('dry_run'))
 
-        # Pridobi obstoječe parfume in proizvajalce za hitre poglede
-        cursor.execute("""
-            SELECT p.product_no, pr.ime AS proizvajalec_ime
-            FROM parfumi p
-            JOIN proizvajalci pr ON pr.id = p.proizvajalec_id
-        """)
-        existing_pairs = {
-            (str(row['product_no']).strip().upper(), str(row['proizvajalec_ime']).strip().upper())
-            for row in (cursor.fetchall() or [])
-        }
+    current_app.logger.info(
+        "Starting perfume sync from Shopify (shop=%s, dry_run=%s)...",
+        shop_domain,
+        dry_run,
+    )
 
-        # Predpomnilnik proizvajalcev (ime -> id)
-        cursor.execute("SELECT id, ime FROM proizvajalci")
-        manufacturer_name_to_id = { (str(r['ime']).strip() if isinstance(r, dict) else str(r[1]).strip()): (r['id'] if isinstance(r, dict) else r[0]) for r in (cursor.fetchall() or []) }
+    result = sync_parfumi_from_shopify(shop_domain, dry_run=dry_run)
+    if result.get("error") and not result.get("ok"):
+        return jsonify({"error": result["error"]}), 400
 
-        added_count = 0
-        scanned_count = 0
-
-        for product in shopify_products:
-            scanned_count += 1
-            vendor = (product.get('vendor') or '').strip()
-            fragrance = ((product.get('product_fragrance') or {}).get('value') or '').strip()
-            product_no = ((product.get('product_no') or {}).get('value') or '').strip()
-            proizvajalec_ime = ((product.get('proizvajalec_id') or {}).get('value') or '').strip()
-
-            if not vendor or not fragrance or not product_no or not proizvajalec_ime:
-                continue
-
-            key = (product_no.upper(), proizvajalec_ime.upper())
-            if key in existing_pairs:
-                continue
-
-            # Pripravi podatke za vnos
-            ime_parfuma = f"{vendor} - {fragrance}"
-            sestava_inci = (product.get('sestava_inci') or {}).get('value') if isinstance(product.get('sestava_inci'), dict) else None
-            na_zalogi = bool(product.get('na_zalogi'))  # nastavljen v get_all_products_for_name_sync
-
-            # Pridobi ali ustvari proizvajalca
-            proizvajalec_id = manufacturer_name_to_id.get(proizvajalec_ime)
-            if not proizvajalec_id:
-                cursor.execute("INSERT INTO proizvajalci (ime) VALUES (%s) ON CONFLICT (ime) DO NOTHING", (proizvajalec_ime,))
-                db.commit()
-                cursor.execute("SELECT id FROM proizvajalci WHERE ime = %s", (proizvajalec_ime,))
-                row = cursor.fetchone()
-                if not row:
-                    current_app.logger.error(f"Ne morem ustvariti proizvajalca '{proizvajalec_ime}' – preskakujem parfum {product_no}")
-                    continue
-                proizvajalec_id = row['id'] if isinstance(row, dict) else row[0]
-                manufacturer_name_to_id[proizvajalec_ime] = proizvajalec_id
-
-            # Vstavi nov parfum
-            cursor.execute(
-                """
-                INSERT INTO parfumi (product_no, proizvajalec_id, ime_parfuma, sestava_inci, na_zalogi, sinhroniziraj_s_shopify)
-                VALUES (%s, %s, %s, %s, %s, TRUE)
-                ON CONFLICT (product_no, proizvajalec_id) DO NOTHING
-                """,
-                (product_no, proizvajalec_id, ime_parfuma, sestava_inci, na_zalogi)
-            )
-            if cursor.rowcount > 0:
-                added_count += 1
-                # Poskrbi za začetni vnos v perfumes_stock
-                cursor.execute(
-                    """
-                    INSERT INTO perfumes_stock (product_no, proizvajalec_id, on_hand, on_order_pending, on_order_committed)
-                    VALUES (%s, %s, 0, 0, 0)
-                    ON CONFLICT (product_no, proizvajalec_id) DO NOTHING
-                    """,
-                    (product_no, proizvajalec_id)
-                )
-
-        db.commit()
-        message = f"Sinhronizacija končana. Pregledanih {scanned_count} izdelkov. Dodanih novih parfumov: {added_count}."
-        current_app.logger.info(message)
-        return jsonify({"message": message})
-
-    except Exception as e:
-        db.rollback()
-        current_app.logger.error(f"Napaka pri sinhronizaciji novih parfumov: {e}")
-        traceback.print_exc()
-        return jsonify({"error": "Prišlo je do napake na strežniku."}), 500
-    finally:
-        cursor.close()
+    message = (
+        f"Sinhronizacija končana ({result.get('shop_domain')}). "
+        f"Pridobljenih: {result.get('fetched', 0)}, "
+        f"dodanih: {result.get('added', 0)}, "
+        f"posodobljenih: {result.get('updated', 0)}, "
+        f"preskočenih: {result.get('skipped', 0)}, "
+        f"napak: {result.get('errors', 0)}"
+        f"{ ' (dry run)' if dry_run else ''}."
+    )
+    current_app.logger.info(message)
+    return jsonify({"message": message, "result": result})
 @api_bp.route('/generiraj_in_poslji', methods=['POST'])
 def generiraj_in_poslji():
     current_app.logger.info("=== GENERIRAJ_IN_POSLJI ENDPOINT CALLED ===")
@@ -9141,18 +9079,54 @@ def list_search_synonyms():
 @api_bp.route('/shopify-stores', methods=['GET'])
 def list_shopify_stores():
     try:
-        stores = get_all_shopify_stores(include_default=True)
+        db = get_db()
+        cursor = db.cursor()
         out = []
-        for store in stores:
-            domain = store.get('shop_domain')
-            if not domain:
-                continue
-            out.append({
-                'shop_domain': domain,
-                'is_active': bool(store.get('is_active', True)),
-                'is_default': bool(store.get('is_default', False)),
-            })
-        out.sort(key=lambda s: (not s.get('is_default', False), s.get('shop_domain', '')))
+        seen: set[str] = set()
+        try:
+            cursor.execute(
+                """
+                SELECT shop_domain, is_active
+                FROM shopify_stores
+                ORDER BY shop_domain
+                """
+            )
+            for row in cursor.fetchall() or []:
+                domain = row['shop_domain'] if isinstance(row, dict) else row[0]
+                is_active = row['is_active'] if isinstance(row, dict) else row[1]
+                if not domain or domain in seen:
+                    continue
+                seen.add(domain)
+                out.append({
+                    'shop_domain': domain,
+                    'is_active': bool(is_active),
+                    'is_default': False,
+                    'is_sync_default': domain == DEFAULT_SYNC_STORE,
+                })
+        finally:
+            cursor.close()
+
+        if not out:
+            stores = get_all_shopify_stores(include_default=True)
+            for store in stores:
+                domain = store.get('shop_domain')
+                if not domain or domain in seen:
+                    continue
+                seen.add(domain)
+                out.append({
+                    'shop_domain': domain,
+                    'is_active': bool(store.get('is_active', True)),
+                    'is_default': bool(store.get('is_default', False)),
+                    'is_sync_default': domain == DEFAULT_SYNC_STORE,
+                })
+
+        out.sort(
+            key=lambda s: (
+                not s.get('is_sync_default', False),
+                not s.get('is_active', True),
+                s.get('shop_domain', ''),
+            )
+        )
         return make_ok(out)
     except Exception as e:
         current_app.logger.error(f"Napaka pri branju Shopify trgovin: {e}")
