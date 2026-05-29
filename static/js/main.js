@@ -2975,7 +2975,7 @@ let narocilaAbortController = null;
     }
     if (syncNamesBtn) {
         syncNamesBtn.addEventListener('click', async () => {
-            showToast('Začenjam sinhronizacijo imen iz Shopify... To lahko traja nekaj časa.', 'info');
+            showToast('Začenjam sinhronizacijo INCI iz Shopify... To lahko traja nekaj časa.', 'info');
             setButtonLoading(syncNamesBtn, true, 'Sinhroniziram...');
 
             try {
@@ -3249,7 +3249,7 @@ let narocilaAbortController = null;
             dryRun
                 ? 'Simuliram sinhronizacijo (dry run)…'
                 : updateExisting
-                    ? 'Sinhroniziram in posodabljam obstoječe… To lahko traja več minut.'
+                    ? 'Posodabljam INCI za obstoječe parfume… To lahko traja več minut.'
                     : 'Dodajam nove parfume iz Shopify-ja… To lahko traja več minut.',
         );
         if (syncParfumiResultEl) {

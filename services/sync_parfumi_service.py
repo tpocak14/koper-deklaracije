@@ -24,14 +24,6 @@ INCI_METAFIELD_KEYS = (
     "custom.sestavine_inci",
 )
 
-FRAGRANCE_KEYS = (
-    "product_fragrance_",
-    "product_fragrance",
-    "fragrance",
-    "product_name",
-    "title",
-)
-
 
 def _normalize_shop_domain(shop_domain: str | None) -> str:
     sd = (shop_domain or "").strip().lower()
@@ -64,28 +56,10 @@ def _resolve_inci(mf_map: dict[str, str]) -> str | None:
     return None
 
 
-def _resolve_ime_parfuma(mf_map: dict[str, str], node: dict[str, Any]) -> str | None:
-    """Ime parfuma: custom.inspiration (celotno, brez pomišljaja med vendorjem in imenom)."""
-    inspiration = (mf_map.get("custom.inspiration") or "").strip()
-    if inspiration:
-        return inspiration
-
-    dekl_vendor = (mf_map.get("custom.deklaracije_vendor") or "").strip()
-    fragrance = ""
-    for key in FRAGRANCE_KEYS:
-        val = (mf_map.get(f"custom.{key}") or "").strip()
-        if val:
-            fragrance = val
-            break
-
-    if dekl_vendor and fragrance:
-        return f"{dekl_vendor} - {fragrance}"
-
-    shopify_vendor = (node.get("vendor") or "").strip()
-    if shopify_vendor and fragrance:
-        return f"{shopify_vendor} - {fragrance}"
-
-    return None
+def _resolve_ime_parfuma(mf_map: dict[str, str]) -> str | None:
+    """Za nove parfume: custom.inspiration (vendor + ime brez pomišljaja; pomišljaj se doda ročno)."""
+    val = (mf_map.get("custom.inspiration") or "").strip()
+    return val or None
 
 
 def parse_product_node(node: dict[str, Any]) -> dict[str, Any]:
@@ -94,11 +68,8 @@ def parse_product_node(node: dict[str, Any]) -> dict[str, Any]:
     product_no = (mf_map.get("custom.product_no") or "").strip()
     proizvajalec_ime = (mf_map.get("custom.proizvajalec_id") or "").strip()
     deklaracije_vendor = (mf_map.get("custom.deklaracije_vendor") or "").strip() or None
-    ime_parfuma = _resolve_ime_parfuma(mf_map, node)
+    ime_parfuma = _resolve_ime_parfuma(mf_map)
     sestava_inci = _resolve_inci(mf_map)
-
-    na_zalogi_raw = (mf_map.get("custom.na_zalogi") or "").strip().lower()
-    na_zalogi = na_zalogi_raw in ("true", "1")
 
     return {
         "product_id": node.get("id") or "",
@@ -108,7 +79,6 @@ def parse_product_node(node: dict[str, Any]) -> dict[str, Any]:
         "proizvajalec_ime": proizvajalec_ime or None,
         "ime_parfuma": ime_parfuma,
         "sestava_inci": sestava_inci,
-        "na_zalogi": na_zalogi,
     }
 
 
@@ -251,12 +221,12 @@ def sync_parfumi_from_shopify(
     """
     Sinhronizira parfume iz izbrane Shopify trgovine v lokalno bazo.
 
-    - ime_parfuma: custom.inspiration (ne vendor + fragrance)
-    - proizvajalec: custom.proizvajalec_id (ključ v bazi)
-    - INCI: custom.sestava_inci ali my_fields.sestava_po_inci
+    App je vir resnice za ime_parfuma in na_zalogi — obstoječih ne prepisujemo.
+    - Novi parfumi: začetno ime iz custom.inspiration (pomišljaj se doda ročno), INCI iz Shopify
+    - Obstoječi (update_existing): samo sestava_inci
 
     Privzeto samo doda manjkajoče (update_existing=False).
-    Če je podan product_ids, posodobi ime+INCI tudi na obstoječih.
+    Če je podan product_ids, posodobi INCI na obstoječih (ne ime, ne zalogo).
     """
     t0 = time.time()
     normalized = _normalize_shop_domain(shop_domain) or DEFAULT_SYNC_STORE
@@ -326,9 +296,8 @@ def sync_parfumi_from_shopify(
                 proizvajalec_ime = product.get("proizvajalec_ime")
                 new_name = product.get("ime_parfuma")
                 sestava_inci = product.get("sestava_inci")
-                na_zalogi = bool(product.get("na_zalogi"))
 
-                if not product_no or not proizvajalec_ime or not new_name:
+                if not product_no or not proizvajalec_ime:
                     result["skipped"] += 1
                     if len(result["skipped_samples"]) < 20:
                         missing = []
@@ -336,8 +305,6 @@ def sync_parfumi_from_shopify(
                             missing.append("product_no")
                         if not proizvajalec_ime:
                             missing.append("proizvajalec_id")
-                        if not new_name:
-                            missing.append("inspiration")
                         result["skipped_samples"].append(
                             {
                                 "product_id": product.get("product_id"),
@@ -387,7 +354,7 @@ def sync_parfumi_from_shopify(
 
                 cursor.execute(
                     """
-                    SELECT id, ime_parfuma, sestava_inci, na_zalogi
+                    SELECT id, ime_parfuma, sestava_inci
                     FROM parfumi
                     WHERE product_no = %s AND proizvajalec_id = %s
                     """,
@@ -408,34 +375,43 @@ def sync_parfumi_from_shopify(
                             )
                         continue
 
-                    updates: list[str] = []
-                    params: list[Any] = []
-
-                    existing_name = existing["ime_parfuma"] if isinstance(existing, dict) else existing[1]
                     existing_inci = existing["sestava_inci"] if isinstance(existing, dict) else existing[2]
-                    existing_na_zalogi = existing["na_zalogi"] if isinstance(existing, dict) else existing[3]
                     parfum_id = existing["id"] if isinstance(existing, dict) else existing[0]
 
-                    if existing_name != new_name:
-                        updates.append("ime_parfuma = %s")
-                        params.append(new_name)
                     if sestava_inci and existing_inci != sestava_inci:
-                        updates.append("sestava_inci = %s")
-                        params.append(sestava_inci)
-                    # na_zalogi samo pri polni sinhronizaciji, ne pri ciljnem uvozu
-                    if not targeted and existing_na_zalogi != na_zalogi:
-                        updates.append("na_zalogi = %s")
-                        params.append(na_zalogi)
-
-                    if updates:
                         if not dry_run:
-                            params.append(parfum_id)
                             cursor.execute(
-                                f"UPDATE parfumi SET {', '.join(updates)}, updated_at = NOW() WHERE id = %s",
-                                params,
+                                """
+                                UPDATE parfumi
+                                SET sestava_inci = %s, updated_at = NOW()
+                                WHERE id = %s
+                                """,
+                                (sestava_inci, parfum_id),
                             )
                         result["updated"] += 1
+                    else:
+                        result["skipped"] += 1
+                        if len(result["skipped_samples"]) < 20:
+                            result["skipped_samples"].append(
+                                {
+                                    "product_id": product.get("product_id"),
+                                    "product_no": product_no,
+                                    "reason": "INCI enak ali manjka v Shopify",
+                                }
+                            )
                 else:
+                    if not new_name:
+                        result["skipped"] += 1
+                        if len(result["skipped_samples"]) < 20:
+                            result["skipped_samples"].append(
+                                {
+                                    "product_id": product.get("product_id"),
+                                    "product_no": product_no,
+                                    "reason": "Manjka: inspiration",
+                                }
+                            )
+                        continue
+
                     if not dry_run:
                         cursor.execute(
                             """
@@ -443,7 +419,7 @@ def sync_parfumi_from_shopify(
                                 product_no, proizvajalec_id, ime_parfuma,
                                 sestava_inci, na_zalogi, sinhroniziraj_s_shopify
                             )
-                            VALUES (%s, %s, %s, %s, %s, TRUE)
+                            VALUES (%s, %s, %s, %s, FALSE, TRUE)
                             ON CONFLICT (product_no, proizvajalec_id) DO NOTHING
                             """,
                             (
@@ -451,7 +427,6 @@ def sync_parfumi_from_shopify(
                                 proizvajalec_id,
                                 new_name,
                                 sestava_inci,
-                                na_zalogi if not targeted else False,
                             ),
                         )
                         if cursor.rowcount > 0:

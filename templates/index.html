@@ -1749,7 +1749,7 @@
                                             <p class="text-sm text-blue-700">Iz Shopify-ja</p>
                                         </div>
                                     </div>
-                                    <p class="text-sm text-blue-800 mb-4 leading-relaxed">Sinhronizira status zaloge za vse izdelke na podlagi 'GREEN' taga v Shopify.</p>
+                                    <p class="text-sm text-blue-800 mb-4 leading-relaxed">Opcijsko nastavi <code>na_zalogi=TRUE</code> za parfume z GREEN tagom v Shopify. Ne nastavlja FALSE — zalogo vodite v aplikaciji.</p>
                                     <button class="w-full inline-flex items-center justify-center px-4 py-3 bg-blue-600 border border-transparent rounded-lg font-medium text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all duration-200 transform hover:scale-105" id="sync-stock-btn">
                                         <i class="bi bi-arrow-repeat mr-2"></i> Sinhroniziraj zalogo
                                     </button>
@@ -1840,13 +1840,13 @@
                                             <i class="bi bi-pencil-square text-white text-xl"></i>
                                         </div>
                                         <div class="ml-4">
-                                            <h3 class="text-lg font-semibold text-yellow-900">Sinhroniziraj imena</h3>
-                                            <p class="text-sm text-yellow-700">Iz Shopify-ja</p>
+                                            <h3 class="text-lg font-semibold text-yellow-900">Sinhroniziraj INCI</h3>
+                                            <p class="text-sm text-yellow-700">Iz Shopify-ja v bazo</p>
                                         </div>
                                     </div>
-                                    <p class="text-sm text-yellow-800 mb-4 leading-relaxed">Posodobi imena parfumov iz Shopify metafielda <code>custom.inspiration</code> (ne več vendor + fragrance).</p>
+                                    <p class="text-sm text-yellow-800 mb-4 leading-relaxed">Posodobi sestavo INCI za obstoječe parfume iz Shopify. Imena in zaloga se ne spreminjata — app je vir resnice.</p>
                                     <button class="w-full inline-flex items-center justify-center px-4 py-3 bg-yellow-600 border border-transparent rounded-lg font-medium text-white hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500 transition-all duration-200 transform hover:scale-105" id="sync-names-btn">
-                                        <i class="bi bi-pencil-square mr-2"></i> Sinhroniziraj imena
+                                        <i class="bi bi-pencil-square mr-2"></i> Sinhroniziraj INCI
                                     </button>
                                 </div>
                             </div>
@@ -1863,7 +1863,7 @@
                                             <p class="text-sm text-green-700">Iz Shopify-ja v bazo</p>
                                         </div>
                                     </div>
-                                    <p class="text-sm text-green-800 mb-4 leading-relaxed">Doda nove parfume iz izbrane Shopify trgovine in posodobi obstoječe.</p>
+                                    <p class="text-sm text-green-800 mb-4 leading-relaxed">Doda nove parfume iz Shopify (ime iz <code>custom.inspiration</code>, INCI). Po uvozu ročno dodate pomišljaj. Obstoječih ne prepisuje — razen INCI.</p>
                                     <button class="w-full inline-flex items-center justify-center px-4 py-3 bg-green-600 border border-transparent rounded-lg font-medium text-white hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition-all duration-200 transform hover:scale-105" id="sync-new-perfumes-btn">
                                         <i class="bi bi-arrow-repeat mr-2"></i> Sinhroniziraj iz Shopify
                                     </button>
@@ -2738,17 +2738,18 @@
                 </label>
                 <label class="flex items-center gap-2 text-sm cursor-pointer">
                     <input id="sync-parfumi-update-existing" type="checkbox" class="rounded border-gray-300 text-amber-600 focus:ring-amber-500">
-                    <span><strong>Posodobi obstoječe</strong> — ime, INCI, na zalogi (privzeto izklopljeno)</span>
+                    <span><strong>Posodobi obstoječe</strong> — samo INCI (ne ime, ne zaloga)</span>
                 </label>
                 <div id="sync-parfumi-progress" class="hidden text-sm text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2 flex items-center gap-2">
                     <span class="inline-block w-3 h-3 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin"></span>
                     <span id="sync-parfumi-progress-text">Sinhroniziram izdelke iz Shopify-ja… To lahko traja več minut.</span>
                 </div>
                 <div class="text-[11px] text-gray-500 bg-gray-50 rounded-md p-2.5 leading-relaxed">
-                Sinhronizacija prebere izdelke iz Shopify-ja in doda manjkajoče v tabelo <code class="px-1 bg-white rounded">parfumi</code>.
-                Ime: <code class="px-1 bg-white rounded">custom.inspiration</code>,
+                App je vir resnice za imena in zalogo. Sinhronizacija doda manjkajoče parfume in opcijsko posodobi INCI.
+                Novi parfumi: začetno ime iz <code class="px-1 bg-white rounded">custom.inspiration</code> (pomišljaj ročno po uvozu),
                 proizvajalec: <code class="px-1 bg-white rounded">custom.proizvajalec_id</code>,
                 INCI: <code class="px-1 bg-white rounded">my_fields.sestava_po_inci</code>.
+                Obstoječa imena se ne prepisujejo.
                 </div>
                 <div id="sync-parfumi-result" class="hidden"></div>
             </div>

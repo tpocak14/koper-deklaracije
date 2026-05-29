@@ -200,23 +200,41 @@ def classify_blockers(missing_strings: List[str]) -> List[str]:
 # ---------------------------------------------------------------------------
 
 def _extract_blocked_parfumi_ids(declaration_items: List[Dict[str, Any]],
-                                 cursor, shopify_details: Dict[str, Any]) -> List[int]:
-    """Iz blokade pridobi parfum_id-je v DB (za smart invalidation).
+                                 cursor,
+                                 shopify_details: Dict[str, Any],
+                                 line_items: List[Dict[str, Any]]) -> List[int]:
+    """Parfum_id-ji, ki dejansko blokirajo PDF (ne vsi parfumi v naročilu).
 
-    Args:
-        declaration_items: line items naročila po Shopify lookup-u
-        cursor: DB cursor
-        shopify_details: mapping product_id → {product_no, proizvajalec_id}
-
-    Returns:
-        seznam parfum_id-jev (int), ki so povezani z blokado
+  Parfumi, ki so uspešno v declaration_items, niso blokirani. Za smart
+  invalidation shranimo samo tiste, ki manjkajo (INCI/serija/metafield).
     """
+    ok_keys = {
+        (
+            str(d.get("product_no") or "").upper(),
+            str(d.get("proizvajalec_ime") or "").upper(),
+        )
+        for d in (declaration_items or [])
+    }
     ids: set[int] = set()
-    for product_id, details in (shopify_details or {}).items():
-        product_no = (details or {}).get("product_no")
-        proizvajalec_ime = ((details or {}).get("proizvajalec_id") or "").upper()
+    seen_keys: set[tuple[str, str]] = set()
+
+    for item in line_items or []:
+        if not item or not item.get("product_id"):
+            continue
+        details = (shopify_details or {}).get(str(item["product_id"]), {}) or {}
+        if (details.get("product_type") or "").strip().lower() != "parfumi":
+            continue
+
+        product_no = details.get("product_no")
+        proizvajalec_ime = ((details.get("proizvajalec_id") or "")).upper()
         if not product_no or not proizvajalec_ime:
             continue
+
+        key = (str(product_no).upper(), proizvajalec_ime)
+        if key in ok_keys or key in seen_keys:
+            continue
+        seen_keys.add(key)
+
         try:
             cursor.execute(
                 "SELECT p.id FROM parfumi p "
@@ -228,8 +246,11 @@ def _extract_blocked_parfumi_ids(declaration_items: List[Dict[str, Any]],
             if row:
                 ids.add(row[0] if not isinstance(row, dict) else row["id"])
         except Exception as e:
-            logger.warning("Failed to resolve parfum_id for %s/%s: %s",
-                           product_no, proizvajalec_ime, e)
+            logger.warning(
+                "Failed to resolve blocked parfum_id for %s/%s: %s",
+                product_no, proizvajalec_ime, e,
+            )
+
     return sorted(ids)
 
 
@@ -331,7 +352,9 @@ def analyze_order(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
     blocked_parfumi: List[int] = []
     if blocked and requires_declaration:
         try:
-            blocked_parfumi = _extract_blocked_parfumi_ids(declaration_items, cursor, shopify_details)
+            blocked_parfumi = _extract_blocked_parfumi_ids(
+                declaration_items, cursor, shopify_details, line_items,
+            )
         except Exception as e:
             logger.warning("Failed to extract blocked parfumi ids: %s", e)
 
