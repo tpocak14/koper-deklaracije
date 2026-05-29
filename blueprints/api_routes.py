@@ -30,8 +30,11 @@ from services.sync_parfumi_service import (
     sync_parfumi_from_shopify,
 )
 from services.restore_parfumi_names import restore_parfumi_names_from_excel
+from services.import_parfumi_names import import_parfumi_names_from_csv
+from services.fix_amour_parfums_names import apply_fix_amour_parfums_names, preview_fix_amour_parfums_names
 import io
 from openpyxl import Workbook
+from openpyxl.styles import Font
 import traceback
 import json
 import json as _json
@@ -1748,6 +1751,10 @@ def required_permission_for(method: str, path: str):
         '/api/migrate-local-excel',
         '/api/migrate-local-file',
         '/api/restore-parfumi-names',
+        '/api/export-parfumi-imena',
+        '/api/import-parfumi-imena',
+        '/api/preview-fix-amour-parfums-names',
+        '/api/apply-fix-amour-parfums-names',
         '/api/run-migration',
         '/api/register-webhooks',
         '/api/list-webhooks',
@@ -4536,13 +4543,13 @@ def sync_new_perfumes():
 
 @api_bp.route('/sync-names', methods=['POST'])
 def sync_perfume_names():
-    """Sinhronizira ime_parfuma iz Shopify (custom.inspiration) v lokalno bazo."""
+    """Posodobi sestavo INCI iz Shopify za obstoječe parfume (ne prepisuje imen)."""
     data = request.get_json(silent=True) or {}
     shop_domain = (data.get('shop_domain') or DEFAULT_SYNC_STORE).strip()
     dry_run = bool(data.get('dry_run'))
 
     current_app.logger.info(
-        "Starting perfume name sync from Shopify inspiration (shop=%s)...",
+        "Starting INCI sync from Shopify (shop=%s)...",
         shop_domain,
     )
 
@@ -4555,8 +4562,8 @@ def sync_perfume_names():
         return jsonify({"error": result["error"]}), 400
 
     message = (
-        f"Sinhronizacija imen končana ({result.get('shop_domain')}). "
-        f"Posodobljenih: {result.get('updated', 0)}, "
+        f"Sinhronizacija INCI končana ({result.get('shop_domain')}). "
+        f"Posodobljenih INCI: {result.get('updated', 0)}, "
         f"preskočenih: {result.get('skipped', 0)}."
         f"{ ' (dry run)' if dry_run else '' }"
     )
@@ -4631,7 +4638,11 @@ def get_all_shopify_products_with_metafields():
 
 @api_bp.route('/sync-stock-status', methods=['POST'])
 def sync_stock_status():
-    """Učinkovito sinhronizira 'na_zalogi' status iz Shopify (tag 'GREEN') v lokalno bazo."""
+    """Posodobi na_zalogi=TRUE le za parfume, ki imajo GREEN tag v Shopify.
+
+    App je vir resnice za zalogo — ta endpoint nikoli ne nastavi na_zalogi=FALSE
+    (npr. ko je izdelek izbrisan iz Shopify-ja).
+    """
     db = get_db()
     cursor = db.cursor()
     try:
@@ -4649,22 +4660,36 @@ def sync_stock_status():
         local_perfumes = cursor.fetchall()
         
         updated_count = 0
+        skipped_count = 0
         in_stock_count = 0
         
         for perfume in local_perfumes:
             lookup_key = f"{perfume['product_no'].strip()}_{perfume['ime_proizvajalca'].strip().upper()}"
             shopify_data = shopify_products.get(lookup_key)
-            
-            is_in_stock_shopify = "GREEN" in shopify_data.get('tags', []) if shopify_data else False
-            
-            cursor.execute("UPDATE parfumi SET na_zalogi = %s WHERE id = %s", (is_in_stock_shopify, perfume['id']))
-            updated_count += 1
+
+            if not shopify_data:
+                skipped_count += 1
+                continue
+
+            is_in_stock_shopify = "GREEN" in shopify_data.get('tags', [])
             if is_in_stock_shopify:
+                cursor.execute(
+                    "UPDATE parfumi SET na_zalogi = TRUE WHERE id = %s AND na_zalogi IS DISTINCT FROM TRUE",
+                    (perfume['id'],),
+                )
+                if cursor.rowcount > 0:
+                    updated_count += 1
                 in_stock_count += 1
         
         db.commit()
         
-        message = f"Sinhronizacija končana. Pregledanih {len(local_perfumes)} izdelkov. Na zalogi (s tagom GREEN): {in_stock_count}."
+        message = (
+            f"Sinhronizacija končana. Pregledanih {len(local_perfumes)} izdelkov. "
+            f"Na zalogi (GREEN v Shopify): {in_stock_count}. "
+            f"Posodobljenih na TRUE: {updated_count}. "
+            f"Preskočenih (ni v Shopify): {skipped_count}. "
+            f"Status na_zalogi=FALSE se iz tega gumba ne nastavlja."
+        )
         return jsonify({"message": message})
 
     except Exception as e:
@@ -6693,6 +6718,146 @@ def restore_parfumi_names_endpoint():
         current_app.logger.error(f"Napaka pri obnovi imen parfumov: {e}")
         traceback.print_exc()
         return jsonify({"error": f"Prišlo je do napake na strežniku: {str(e)}"}), 500
+
+
+@api_bp.route('/export-parfumi-imena', methods=['GET'])
+def export_parfumi_imena():
+    """Izvozi id, proizvajalec_id, ime_proizvajalca, ime_parfuma za vse parfume."""
+    import csv
+    import io
+    from datetime import datetime
+
+    fmt = (request.args.get("format") or "xlsx").strip().lower()
+
+    db = get_db()
+    cursor = db.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT pr.ime AS proizvajalec, p.product_no, p.ime_parfuma
+            FROM parfumi p
+            JOIN proizvajalci pr ON pr.id = p.proizvajalec_id
+            ORDER BY pr.ime, p.product_no
+            """
+        )
+        rows = cursor.fetchall() or []
+    finally:
+        cursor.close()
+
+    stamp = datetime.now().strftime("%Y%m%d")
+    headers_ui = ["Proizvajalec", "Šifra izdelka (Product No)", "Ime parfuma"]
+
+    if fmt == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(headers_ui)
+        for row in rows:
+            if isinstance(row, dict):
+                writer.writerow(
+                    [row["proizvajalec"], row["product_no"], row["ime_parfuma"]]
+                )
+            else:
+                writer.writerow(row)
+        return Response(
+            buf.getvalue(),
+            mimetype="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="parfumi_imena_{stamp}.csv"',
+            },
+        )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Parfumi"
+    ws.append(headers_ui)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+    for row in rows:
+        if isinstance(row, dict):
+            ws.append([row["proizvajalec"], row["product_no"], row["ime_parfuma"]])
+        else:
+            ws.append(row)
+    for r in range(2, ws.max_row + 1):
+        ws.cell(row=r, column=2).number_format = "@"
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 22
+    ws.column_dimensions["C"].width = 52
+    ws.freeze_panes = "A2"
+
+    xbuf = io.BytesIO()
+    wb.save(xbuf)
+    xbuf.seek(0)
+    return send_file(
+        xbuf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"parfumi_imena_{stamp}.xlsx",
+    )
+
+
+@api_bp.route('/import-parfumi-imena', methods=['POST'])
+def import_parfumi_imena():
+    """Uvozi popravljena ime_parfuma iz CSV (id, proizvajalec_id, ime_parfuma)."""
+    dry_run = True
+    try:
+        if request.content_type and "multipart/form-data" in request.content_type:
+            dry_run = request.form.get("dry_run", "true").lower() != "false"
+            upload = request.files.get("file")
+            if not upload or not upload.filename:
+                return jsonify({"error": "Manjka CSV datoteka (file)."}), 400
+            file_bytes = upload.read()
+        else:
+            data = request.get_json(silent=True) or {}
+            dry_run = bool(data.get("dry_run", True))
+            return jsonify({
+                "error": "Naloži CSV kot multipart/form-data (polje file).",
+            }), 400
+
+        result = import_parfumi_names_from_csv(file_bytes, dry_run=dry_run)
+        if result.get("error") and not result.get("ok"):
+            return jsonify({"error": result["error"], "result": result}), 500
+
+        action = "Simulacija" if dry_run else "Uvoz"
+        message = (
+            f"{action} imen končana. Vrstic v datoteki: {result.get('rows_in_file', 0)}, "
+            f"posodobljenih: {result.get('updated', 0)}, "
+            f"nespremenjenih: {result.get('unchanged', 0)}, "
+            f"preskočenih: {result.get('skipped', 0)}."
+        )
+        return jsonify({"message": message, "result": result})
+    except Exception as e:
+        current_app.logger.error(f"Napaka pri uvozu imen parfumov: {e}")
+        traceback.print_exc()
+        return jsonify({"error": f"Prišlo je do napake na strežniku: {str(e)}"}), 500
+
+
+@api_bp.route('/preview-fix-amour-parfums-names', methods=['GET', 'POST'])
+def preview_fix_amour_parfums_names_endpoint():
+    """Predogled popravkov AMOUR PARFUMS - → deklaracije_vendor (ne piše v bazo)."""
+    data = request.get_json(silent=True) or {}
+    shop_domain = (data.get('shop_domain') or request.args.get('shop_domain') or 'amour-parfums-2.myshopify.com').strip()
+    result = preview_fix_amour_parfums_names(shop_domain)
+    if not result.get('ok'):
+        return jsonify({"error": result.get("error", "Napaka")}), 400
+    return jsonify(result)
+
+
+@api_bp.route('/apply-fix-amour-parfums-names', methods=['POST'])
+def apply_fix_amour_parfums_names_endpoint():
+    """Uporabi popravke iz deklaracije_vendor (privzeto dry_run)."""
+    data = request.get_json(silent=True) or {}
+    shop_domain = (data.get('shop_domain') or 'amour-parfums-2.myshopify.com').strip()
+    dry_run = bool(data.get('dry_run', True))
+    result = apply_fix_amour_parfums_names(shop_domain, dry_run=dry_run)
+    if not result.get('ok'):
+        return jsonify({"error": result.get("error", "Napaka"), "result": result}), 400
+    action = "Simulacija" if dry_run else "Popravek"
+    message = (
+        f"{action} končan. Kandidatov: {result.get('candidates', 0)}, "
+        f"posodobitev: {result.get('would_update', 0) if dry_run else result.get('applied', 0)}."
+    )
+    return jsonify({"message": message, "result": result})
+
 
 @api_bp.route('/auto-enable-shopify-sync', methods=['POST'])
 def auto_enable_shopify_sync():
