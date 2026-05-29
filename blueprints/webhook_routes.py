@@ -693,6 +693,13 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                     order_number = payload.get('name', f"#{order_id}") if isinstance(payload, dict) else f"#{order_id}"
                     last_fulfilled_order = {'order_number': order_number, 'timestamp': time.time()}
 
+                    # Commit-amo fulfilled_at UPDATE TAKOJ, preden spodaj kličemo
+                    # počasne Shopify API-je (get_orders_fulfillment_status,
+                    # get_order_fulfillment_details). Sicer povezava ostane
+                    # "idle in transaction" med temi zunanjimi klici in se
+                    # kopiči proti deljenemu 20-povezavnemu limitu.
+                    db.commit()
+
                 # The existing additional fulfillment checks and declaration/email flow remain,
                 # but are executed in background to avoid blocking the request.
                 # Dodatna obdelava v notranjem try, da ujamemo napake in ne prekinemo handlerja
@@ -708,7 +715,11 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                         """,
                         (shop_domain,)
                     )
-                    for order in cursor.fetchall():
+                    _pending_orders = cursor.fetchall()
+                    # Zapremo bralno transakcijo, preden spodaj kličemo počasne
+                    # Shopify API-je, da povezava ne ostane "idle in transaction".
+                    db.commit()
+                    for order in _pending_orders:
                         try:
                             if get_orders_fulfillment_status(order['shopify_order_id'], shop_domain=shop_domain):
                                 try:

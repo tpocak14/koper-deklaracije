@@ -4,15 +4,35 @@ from flask import g, current_app, cli
 import click
 
 def get_db():
-    """Vrne povezavo na bazo podatkov, ki je shranjena v g kontekstu."""
+    """Vrne povezavo na bazo podatkov, ki je shranjena v g kontekstu.
+
+    Vsaka povezava nastavi `idle_in_transaction_session_timeout`, da Postgres
+    samodejno počisti morebitne viseče transakcije (npr. background webhook
+    thread, ki naredi UPDATE in nato čaka na počasen Shopify klic). Brez tega
+    se take povezave kopičijo kot `idle in transaction` in zapolnijo deljeni
+    20-povezavni limit Heroku essential-0 plana -> potem padejo VSE povezave
+    (Flask + Vercel v2) s "too many connections for role".
+    """
     if 'db' not in g:
-        g.db = psycopg.connect(current_app.config['DATABASE_URL'], row_factory=dict_row)
+        g.db = psycopg.connect(
+            current_app.config['DATABASE_URL'],
+            row_factory=dict_row,
+            options='-c idle_in_transaction_session_timeout=60000',
+        )
     return g.db
 
 def close_db(e=None):
-    """Zapre povezavo na bazo podatkov."""
+    """Zapre povezavo na bazo podatkov.
+
+    Pred zaprtjem naredimo rollback morebitne nepotrjene transakcije, da se
+    povezava sprosti v čistem stanju in ne ostane v "idle in transaction".
+    """
     db = g.pop('db', None)
     if db is not None:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         db.close()
 
 def init_db():
