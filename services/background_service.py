@@ -28,7 +28,8 @@ def process_fulfilled_orders_background():
     """
     current_app.logger.info("=== BACKGROUND: Začenjam procesiranje neprocesiranih fulfilled naročil ===")
     
-    db = get_db()
+    # background=True: izklopi idle-in-transaction timeout (počasni Shopify/MK klici).
+    db = get_db(background=True)
     cursor = db.cursor()
     
     try:
@@ -324,7 +325,7 @@ def _ensure_declaration_rows(cursor, order_data: dict) -> bool:
 
 def process_fulfilled_orders_daily(window_days: int = 1) -> None:
     """Run daily batch: ensure all fulfilled orders in window have PDF."""
-    db = get_db()
+    db = get_db(background=True)
     cursor = db.cursor()
     try:
         db.rollback()
@@ -686,7 +687,7 @@ def backfill_fulfillment_from_shopify(*, days: int = 14, limit: int = 300) -> di
     even if status is `pripravljeno_za_posiljanje` or unset. Po backfillu jih
     bo hourly reconcile in 21:00 batch normalno procesiral (PDF + MK upload).
     """
-    db = get_db()
+    db = get_db(background=True)
     cursor = db.cursor()
     updated = 0
     checked = 0
@@ -738,7 +739,7 @@ def reconcile_missing_declarations(hours_back: int = 72, limit: int = 500) -> di
     Also re-check older orders marked as missing data to avoid stale flags after
     series/INCI data is corrected.
     """
-    db = get_db()
+    db = get_db(background=True)
     cursor = db.cursor()
     updated = 0
     checked = 0

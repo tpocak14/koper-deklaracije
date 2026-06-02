@@ -1,24 +1,49 @@
+import os
 import psycopg
 from psycopg.rows import dict_row
 from flask import g, current_app, cli
 import click
 
-def get_db():
-    """Vrne povezavo na bazo podatkov, ki je shranjena v g kontekstu.
+# Privzeti `idle_in_transaction_session_timeout` (ms) za navadne (request)
+# povezave. Spletne zahteve nikoli ne smejo legitimno viseti "idle in
+# transaction" >60s, zato je to varovalka proti puščanju povezav (glej commit
+# 9775564). Override prek env `PG_IDLE_TX_TIMEOUT_MS`.
+_DEFAULT_IDLE_TX_TIMEOUT_MS = os.environ.get('PG_IDLE_TX_TIMEOUT_MS', '60000')
 
-    Vsaka povezava nastavi `idle_in_transaction_session_timeout`, da Postgres
-    samodejno počisti morebitne viseče transakcije (npr. background webhook
-    thread, ki naredi UPDATE in nato čaka na počasen Shopify klic). Brez tega
-    se take povezave kopičijo kot `idle in transaction` in zapolnijo deljeni
-    20-povezavni limit Heroku essential-0 plana -> potem padejo VSE povezave
-    (Flask + Vercel v2) s "too many connections for role".
+# Za BACKGROUND opravila (safety net, reconcile, MK sync ...) je timeout
+# IZKLOPLJEN (0). Ti jobi legitimno držijo transakcijo odprto, medtem ko
+# kličejo POČASNE zunanje API-je (MetaKocka iskanje/attach, Shopify), kar
+# pogosto preseže 60s. S 60s timeoutom je Postgres prekinil povezavo sredi
+# joba ("terminating connection due to idle-in-transaction timeout") in job
+# se je sesul → deklaracije se niso pošiljale. Override: `PG_BG_IDLE_TX_TIMEOUT_MS`.
+_BG_IDLE_TX_TIMEOUT_MS = os.environ.get('PG_BG_IDLE_TX_TIMEOUT_MS', '0')
+
+
+def get_db(background: bool = False):
+    """Vrne povezavo na bazo podatkov, shranjeno v g kontekstu.
+
+    Args:
+        background: če True, je `idle_in_transaction_session_timeout` izklopljen
+            (oz. `PG_BG_IDLE_TX_TIMEOUT_MS`). Uporabi v dolgotrajnih batch jobih,
+            ki držijo transakcijo odprto med počasnimi zunanjimi API klici.
+            Sicer velja `PG_IDLE_TX_TIMEOUT_MS` (privzeto 60s) za request povezave.
     """
+    timeout_ms = _BG_IDLE_TX_TIMEOUT_MS if background else _DEFAULT_IDLE_TX_TIMEOUT_MS
     if 'db' not in g:
         g.db = psycopg.connect(
             current_app.config['DATABASE_URL'],
             row_factory=dict_row,
-            options='-c idle_in_transaction_session_timeout=60000',
+            options=f'-c idle_in_transaction_session_timeout={timeout_ms}',
         )
+    elif background:
+        # Povezava že obstaja (npr. ročni klic joba iz request konteksta) —
+        # sprosti timeout za to sejo, da dolgotrajni job ne bo prekinjen.
+        try:
+            with g.db.cursor() as c:
+                c.execute(f"SET idle_in_transaction_session_timeout = {int(timeout_ms)}")
+            g.db.commit()
+        except Exception:
+            pass
     return g.db
 
 def close_db(e=None):

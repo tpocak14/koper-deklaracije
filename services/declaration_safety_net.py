@@ -1471,7 +1471,9 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
             cron uporablja 14 da pokrije tudi zamujena naročila)
         batch_limit: max naročil v enem zagonu
     """
-    db = get_db()
+    # background=True: izklopi idle-in-transaction timeout — job drži
+    # transakcijo odprto med počasnimi MK/Mandrill klici (sicer prekinitev).
+    db = get_db(background=True)
     cursor = db.cursor()
 
     stats = {
@@ -1563,7 +1565,7 @@ def run_backfill_blocked_orders_job(
         stats dict (scanned, resolved, still_blocked, uploaded_mk_only,
         uploaded_and_mandrill, errors, details)
     """
-    db = get_db()
+    db = get_db(background=True)
     cursor = db.cursor()
 
     stats: Dict[str, Any] = {
@@ -1711,7 +1713,7 @@ def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> D
 
     Returns: stats dict
     """
-    db = get_db()
+    db = get_db(background=True)
     cursor = db.cursor()
 
     stats = {
@@ -1957,7 +1959,7 @@ def run_mandrill_verify_job() -> Dict[str, Any]:
       - mandrill_safety_attempted_at > NOW() - 7 days
     """
     from services import mandrill_service as mc
-    db = get_db()
+    db = get_db(background=True)
     cursor = db.cursor()
 
     stats = {"checked": 0, "updated": 0, "failures": 0, "alerts": 0, "details": []}

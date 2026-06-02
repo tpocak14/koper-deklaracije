@@ -104,7 +104,7 @@ def mk_attach(order_number: str):
     if not on:
         return jsonify({'ok': False, 'error': 'missing order_number'}), 400
 
-    db = get_db()
+    db = get_db(background=True)
     c = db.cursor()
     try:
         c.execute(
@@ -226,7 +226,7 @@ def mk_bill_pdf(order_number: str):
     if not on:
         return jsonify({'ok': False, 'error': 'missing order_number'}), 400
 
-    db = get_db()
+    db = get_db(background=True)
     c = db.cursor()
     try:
         c.execute(
@@ -295,7 +295,7 @@ def declaration_send_mandrill(order_number: str):
     if not on:
         return jsonify({'ok': False, 'error': 'missing order_number'}), 400
 
-    db = get_db()
+    db = get_db(background=True)
     c = db.cursor()
     try:
         c.execute(
@@ -385,7 +385,7 @@ def safety_net_process_one(order_number: str):
     sync_mode = request.args.get('sync', '').strip() in ('1', 'true', 'yes')
 
     from services.declaration_safety_net import process_one
-    db = get_db()
+    db = get_db(background=True)
     c = db.cursor()
     try:
         c.execute(
@@ -635,7 +635,7 @@ def mk_cache_warmup():
     if not base or not company_id or not secret:
         return jsonify({'ok': False, 'error': 'mk_config_missing'}), 500
 
-    db = get_db()
+    db = get_db(background=True)
     c = db.cursor()
     stats: Dict[str, Any] = {
         'pages_fetched': 0,
@@ -871,7 +871,7 @@ def mk_status_check(order_number: str):
         mk_find_and_cache_sales_order_id,
     )
 
-    db = get_db()
+    db = get_db(background=True)
     c = db.cursor()
     try:
         c.execute(

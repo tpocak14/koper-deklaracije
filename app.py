@@ -138,6 +138,10 @@ def create_app():
         def sync_mk_bills_job():
             with app.app_context():
                 try:
+                    # Izklopi idle-in-transaction timeout za to (dolgotrajno) povezavo —
+                    # MK sync drži transakcijo med počasnimi MK API klici.
+                    from database import get_db as _get_db
+                    _get_db(background=True)
                     from services.mk_service import mk_sync_bills
                     imported = mk_sync_bills(days=1, max_scan_per_type=3000, page_size=200)
                     app.logger.info(f"MK nightly sync: imported/updated {imported} bills")
@@ -150,6 +154,8 @@ def create_app():
         def retail_delta_job():
             with app.app_context():
                 try:
+                    from database import get_db as _get_db
+                    _get_db(background=True)
                     from services.mk_service import mk_import_retail_bills_delta
                     imported = mk_import_retail_bills_delta(hours=24, scan_window=5000)
                     app.logger.info(f"Retail nightly delta: imported {imported} retail bills in last 24h")
