@@ -142,9 +142,13 @@ def create_app():
                     # MK sync drži transakcijo med počasnimi MK API klici.
                     from database import get_db as _get_db
                     _get_db(background=True)
-                    from services.mk_service import mk_sync_bills
+                    from services.mk_service import mk_sync_bills, mk_backfill_orders_bill_ids
                     imported = mk_sync_bills(days=1, max_scan_per_type=3000, page_size=200)
                     app.logger.info(f"MK nightly sync: imported/updated {imported} bills")
+                    # Po importu poveži račune z naročili (hitra SQL operacija) —
+                    # da je mk_bill_id znan takoj na strani naročila, brez klika.
+                    linked = mk_backfill_orders_bill_ids(days=60)
+                    app.logger.info(f"MK nightly sync: povezanih {linked} naročil z računi")
                 except Exception as e:
                     app.logger.error(f"Napaka pri nočnem MK sync-u: {e}")
 

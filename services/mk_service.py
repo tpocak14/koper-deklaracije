@@ -3586,6 +3586,66 @@ def mk_find_bill_in_db(order_ref: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def mk_backfill_orders_bill_ids(days: int = 60) -> int:
+    """Poveži že sinhronizirane MK račune (mk_bills) z naročili.
+
+    Zapiše `orders.mk_bill_id` + `mk_bill_type` za naročila, ki ga še nimajo,
+    z ujemanjem po title/buyer_order (skladno z `_matches_order_ref`). Čista
+    SQL operacija — brez MK API klicev — zato je status MK računa znan takoj
+    (brez potrebe po kliku/odpiranju PDF-ja). Ob več zadetkih izbere najnovejši
+    račun (po publish_ts). Vrne število posodobljenih naročil.
+    """
+    try:
+        from database import get_db
+        db = get_db(); c = db.cursor()
+        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
+        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_type TEXT")
+        c.execute(
+            """
+            WITH ranked AS (
+                SELECT o.order_number AS onum,
+                       b.mk_id AS mk_id,
+                       b.doc_type AS doc_type,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY o.order_number
+                           ORDER BY b.publish_ts DESC NULLS LAST
+                       ) AS rn
+                FROM orders o
+                JOIN mk_bills b
+                  ON trim(both '#' from btrim(o.order_number)) =
+                       trim(both '#' from btrim(COALESCE(b.title, '')))
+                  OR trim(both '#' from btrim(o.order_number)) =
+                       trim(both '#' from btrim(COALESCE(b.buyer_order, '')))
+                WHERE o.mk_bill_id IS NULL
+                  AND b.mk_id IS NOT NULL
+                  AND trim(both '#' from btrim(o.order_number)) <> ''
+                  AND COALESCE(o.fulfilled_at, o.created_at) > NOW() - make_interval(days => %s)
+            )
+            UPDATE orders o
+            SET mk_bill_id = r.mk_id,
+                mk_bill_type = NULLIF(r.doc_type, '')
+            FROM ranked r
+            WHERE o.order_number = r.onum AND r.rn = 1
+            """,
+            (int(days),),
+        )
+        updated = c.rowcount or 0
+        db.commit()
+        try:
+            current_app.logger.info(
+                f"mk_backfill_orders_bill_ids: povezanih {updated} naročil z MK računi"
+            )
+        except Exception:
+            pass
+        return updated
+    except Exception as e:
+        try:
+            current_app.logger.error(f"mk_backfill_orders_bill_ids error: {e}")
+        except Exception:
+            pass
+        return 0
+
+
 def mk_sync_bills_from_orders(days: int = 1, max_orders: int = 2000) -> int:
     """Import bills by iterating local orders from the last `days` and resolving their bills via search.
 
