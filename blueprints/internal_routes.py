@@ -75,6 +75,79 @@ def _unauthorized():
     return jsonify({'ok': False, 'error': 'unauthorized'}), 403
 
 
+def _resolve_mk_bill(c, row):
+    """Razreši (mk_id, doc_type) za naročilo za prikaz uradnega MK računa.
+
+    Vrstni red:
+      1. orders.mk_bill_id (če je že cachiran) — instant.
+      2. lokalni mk_bills (mk_find_bill_in_db) — instant.
+      3. MK iskanje v živo (mk_find_bill_quick po prodajnih tipih) z wall-clock
+         budgetom, da ostanemo pod Heroku 30s timeoutom.
+
+    Ob uspešni resoluciji v živo cachira mk_bill_id + mk_bill_type nazaj v orders,
+    da so prihodnji kliki (PDF / MK povezava) takojšnji. Vrne (None, None) če
+    računa ni mogoče hitro najti.
+    """
+    mk_id = row.get('mk_bill_id')
+    doc_type = row.get('mk_bill_type') or None
+    if mk_id:
+        return str(mk_id), (doc_type or 'sales_bill_foreign')
+
+    on = (row.get('order_number') or '').strip()
+    shop_id = row.get('shopify_order_id')
+    found = None
+    try:
+        import time as _t
+        from services.mk_service import (
+            mk_find_bill_in_db, mk_find_bill_quick, _mk_sales_doc_types,
+        )
+
+        hit = mk_find_bill_in_db(on)
+        if hit and hit.get('mk_id'):
+            found = (str(hit['mk_id']), hit.get('doc_type') or 'sales_bill_foreign')
+
+        if not found:
+            deadline = _t.monotonic() + 22.0
+            refs = [on]
+            clean = on.lstrip('#')
+            if clean and clean != on:
+                refs.append(clean)
+            if shop_id:
+                refs.append(str(shop_id))
+            for ref in refs:
+                if _t.monotonic() > deadline:
+                    break
+                for dt in _mk_sales_doc_types():
+                    if _t.monotonic() > deadline:
+                        break
+                    d = mk_find_bill_quick(dt, ref, limit=25)
+                    if d and d.get('mk_id'):
+                        found = (str(d['mk_id']), d.get('_doc_type') or dt)
+                        break
+                if found:
+                    break
+    except Exception as e:
+        current_app.logger.error(f"_resolve_mk_bill error: {e}")
+        return None, None
+
+    if not found:
+        return None, None
+
+    mk_id, doc_type = found
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
+        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_type TEXT")
+        c.execute(
+            "UPDATE orders SET mk_bill_id = %s, mk_bill_type = %s "
+            "WHERE order_number = %s OR order_number = %s",
+            (mk_id, doc_type, on, f"#{on.lstrip('#')}"),
+        )
+        c.connection.commit()
+    except Exception as e:
+        current_app.logger.warning(f"_resolve_mk_bill cache write failed: {e}")
+    return mk_id, doc_type
+
+
 @internal_bp.route('/backfill-fulfillment', methods=['GET', 'POST'])
 def backfill_fulfillment():
     if not _is_authorized():
@@ -231,7 +304,7 @@ def mk_bill_pdf(order_number: str):
     try:
         c.execute(
             """
-            SELECT order_number, mk_bill_id, mk_bill_type, country_code
+            SELECT order_number, shopify_order_id, mk_bill_id, mk_bill_type, country_code
             FROM orders
             WHERE order_number = %s OR order_number = %s OR order_number = %s
             LIMIT 1
@@ -242,11 +315,11 @@ def mk_bill_pdf(order_number: str):
         if not row:
             return jsonify({'ok': False, 'error': 'order_not_found', 'order_number': on}), 404
         r = dict(row) if not isinstance(row, dict) else row
-        mk_id = r.get('mk_bill_id')
+        mk_id, doc_type = _resolve_mk_bill(c, r)
         if not mk_id:
             return jsonify({'ok': False, 'error': 'mk_bill_missing', 'order_number': on}), 404
 
-        doc_type = r.get('mk_bill_type') or 'sales_bill_foreign'
+        doc_type = doc_type or 'sales_bill_foreign'
         cc = (r.get('country_code') or 'SI').upper()
         locale_pair = _MK_PDF_LOCALE_BY_CC.get(cc, ('sl', 'si'))
 
@@ -268,6 +341,66 @@ def mk_bill_pdf(order_number: str):
         )
     except Exception as e:
         current_app.logger.error(f"/api/internal/mk/bill-pdf error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+# MK doc_type → spletni razdelek v MetaKocki (index.jsp#<section>)
+_MK_WEB_SECTION_BY_TYPE = {
+    'sales_bill_foreign': 'prodaja_racuni_tuji',
+    'sales_bill_domestic': 'prodaja_racuni',
+    'sales_bill_retail': 'prodaja_racuni_mp',
+    'sales_bill_prepaid': 'prodaja_racuni_avansni',
+    'sales_bill_credit_note': 'prodaja_dobropisi',
+}
+
+
+@internal_bp.route('/mk/bill-url/<path:order_number>', methods=['GET'])
+def mk_bill_url(order_number: str):
+    """Razreši MK račun za naročilo in vrne neposredno spletno povezavo v MetaKocko.
+
+    Privzeto vrne JSON `{ ok, url, mk_id, mk_bill_type }`. Z `?redirect=1` naredi
+    302 preusmeritev na MK spletni vmesnik (uporabno za direkten <a href>).
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    on = (order_number or '').strip()
+    if not on:
+        return jsonify({'ok': False, 'error': 'missing order_number'}), 400
+
+    db = get_db(background=True)
+    c = db.cursor()
+    try:
+        c.execute(
+            """
+            SELECT order_number, shopify_order_id, mk_bill_id, mk_bill_type
+            FROM orders
+            WHERE order_number = %s OR order_number = %s OR order_number = %s
+            LIMIT 1
+            """,
+            (on, on.lstrip('#'), f"#{on.lstrip('#')}"),
+        )
+        row = c.fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'order_not_found', 'order_number': on}), 404
+        r = dict(row) if not isinstance(row, dict) else row
+        mk_id, doc_type = _resolve_mk_bill(c, r)
+        if not mk_id:
+            return jsonify({'ok': False, 'error': 'mk_bill_missing', 'order_number': on}), 404
+
+        import time as _t
+        section = _MK_WEB_SECTION_BY_TYPE.get(doc_type or '', 'prodaja_racuni_tuji')
+        url = f"https://main.metakocka.si/index.jsp#{section}?id={mk_id}&ts={int(_t.time() * 1000)}"
+
+        if request.args.get('redirect') == '1':
+            return Response(status=302, headers={'Location': url, 'Cache-Control': 'no-store'})
+        return jsonify({'ok': True, 'url': url, 'mk_id': mk_id, 'mk_bill_type': doc_type})
+    except Exception as e:
+        current_app.logger.error(f"/api/internal/mk/bill-url error: {e}")
         return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         try:
