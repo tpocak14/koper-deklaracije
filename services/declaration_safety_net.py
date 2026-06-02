@@ -1290,7 +1290,8 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
     try:
         from blueprints.api_routes import _shrani_deklaracijo_v_bazo
         from services.pdf_service import generate_declaration_pdf
-        from services.mk_service import mk_attach_declaration_for_order
+        # OPOMBA: MK upload (mk_attach_declaration_for_order) tukaj NE izvajamo —
+        # opravi ga ločeno reconcile/daily job (glej zasnovo spodaj).
 
         ok = _shrani_deklaracijo_v_bazo(order_number, analysis["declaration_items"], cursor)
         if not ok:
@@ -1319,41 +1320,27 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
             (order_number,)
         )
 
-        # 7. Pridobi/poišči mk_sales_order_id (priponka MORA iti na sales_order,
-        #    da MK sproži Mandrill trigger; sales_bill ne sprozi tega trigger-ja).
+        # 7. Pridobi mk_sales_order_id — potreben SAMO za preverbo MK statusa.
+        #    Bulk cron `mk-cache-warmup` ga vzdržuje cache-iranega (en paginiran
+        #    scan pokrije več sto naročil), zato je preverba hitra; drag-search
+        #    je le fallback, če cache manjka.
         mk_sales_order_id = order_data.get("mk_sales_order_id")
         if not mk_sales_order_id:
             logger.info("Searching mk_sales_order_id for %s (not cached)...", order_number)
             mk_sales_order_id = mk_find_and_cache_sales_order_id(order_number, cursor)
-            if mk_sales_order_id:
-                logger.info("Found and cached mk_sales_order_id=%s for %s",
-                            mk_sales_order_id, order_number)
 
-        # 8. Naloži v MK na sales_order (key change: MORA biti sales_order)
-        attach = mk_attach_declaration_for_order(
-            order_number,
-            shopify_order_id=order_data.get("shopify_order_id"),
-            mk_bill_id=order_data.get("mk_bill_id"),
-            mk_bill_type=order_data.get("mk_bill_type"),
-            mk_sales_order_id=mk_sales_order_id,
-        )
-        if not attach.get("success"):
-            result["action"] = "error"
-            result["reason"] = f"mk_attach_failed: {attach.get('error')}"
+        # OPOMBA (zasnova): PDF deklaracije NE nalagamo v MK na tej (send) poti.
+        # Naša app je primarni pošiljatelj prek Mandrilla in PDF ustvari sama —
+        # iz MK rabimo le podatek, ali je naročilo "Zaključeno". MK upload PDF-ja
+        # (mk_attach_declaration_for_order) je ločen, asinhron korak, ki ga opravi
+        # reconcile/daily job (ko je mk_decl_uploaded_at IS NULL). Tako počasni MK
+        # klici (iskanje + upload) NE zavirajo pošiljanja kupcu.
+        if not mk_sales_order_id:
+            result["action"] = "uploaded_mk_only"
+            result["reason"] = "mk_sales_order_id ni najden — počakamo (MK status neznan)"
             return result
 
-        # Mark MK upload done
-        cursor.execute(
-            "UPDATE orders SET mk_decl_uploaded_at = NOW() WHERE order_number = %s",
-            (order_number,)
-        )
-
-        # Določi, na kateri doc_type je bila priponka dejansko naložena.
-        # Če smo naložili na sales_bill (ker sales_order ni bil najden), MK
-        # Mandrill trigger se NE bo sprožil — gremo direktno na Mandrill API.
-        attached_to_sales_order = (attach.get("doc_type") == "sales_order")
-
-        # 9. Preveri MK status z novo klasifikacijo
+        # 8. Preveri MK status (edina informacija, ki jo rabimo iz MK).
         mk_status_full = mk_check_sales_order_status_full(mk_sales_order_id)
         mk_category = classify_mk_status(
             mk_status_full.get("status_desc"), mk_status_full.get("status_code")
@@ -1371,8 +1358,6 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
             (mk_status_full.get("status_desc"), mk_status_full.get("status_code"), order_number)
         )
 
-        # EDGE CASE: naročilo je med upload-om prešlo v "Vračilo paketa".
-        # Ne pošljemo Mandrill (paket se vrača nazaj).
         if mk_category == "returned":
             cursor.execute(
                 """
@@ -1384,26 +1369,20 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
             )
             result["action"] = "returned"
             result["reason"] = (
-                f"MK status med upload-om: {mk_status_full.get('status_code')} "
+                f"MK status: {mk_status_full.get('status_code')} "
                 f"— paket se vrača, Mandrill se ne pošlje"
             )
             return result
 
-        # Direkten Mandrill send je potreben SAMO če JE MK status 'completed'.
-        # (Po dogovoru 2026-05-26: pošljemo deklaracijo SAMO ko je naročilo
-        # zaključeno v MK — tj. dostavljeno + plačano.)
-        # Edge case: če priponka ni bila naložena na sales_order (samo na
-        # sales_bill kjer MK trigger ne deluje), pošljemo direktno tudi takrat,
-        # vendar SAMO če je status completed.
+        # Pošljemo SAMO če je MK status 'Zaključeno' (completed).
+        # (Po dogovoru 2026-05-26: deklaracija gre kupcu šele ob zaključku v MK.)
         is_completed = (mk_category == "completed")
-
         if not is_completed:
-            # Vse drugo (shipped / pending / unknown) → čakamo
+            # shipped / pending / unknown → čakamo na "Zaključeno"
             result["action"] = "uploaded_mk_only"
             result["reason"] = (
                 f"mk_status={mk_status_full.get('status_code') or mk_status_full.get('status_desc') or 'unknown'} "
-                f"(category={mk_category}), attached_to={attach.get('doc_type')} "
-                f"— čakamo, da MK preide v 'Zaključeno'"
+                f"(category={mk_category}) — čakamo, da MK preide v 'Zaključeno'"
             )
             return result
 
@@ -1429,8 +1408,7 @@ def process_one(order_data: Dict[str, Any], cursor) -> Dict[str, Any]:
             else:
                 result["action"] = "uploaded_and_mandrill"
             result["reason"] = (
-                f"mk_status={mk_status or 'unknown'}, attached_to={attach.get('doc_type')} "
-                f"→ {channel} ({send_res.get('reason')})"
+                f"mk_status={mk_status or 'unknown'} → {channel} ({send_res.get('reason')})"
             )
             return result
 
