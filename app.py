@@ -165,11 +165,14 @@ def create_app():
                 try:
                     from database import get_db as _get_db
                     _get_db(background=True)
-                    from services.mk_service import mk_sync_bills, mk_backfill_orders_bill_ids
-                    days = int(os.environ.get('MK_BILL_LINK_SYNC_DAYS', '3') or 3)
-                    scan = int(os.environ.get('MK_BILL_LINK_MAX_SCAN', '500') or 500)
-                    mk_sync_bills(days=days, max_scan_per_type=scan, page_size=200)
-                    linked = mk_backfill_orders_bill_ids(days=30)
+                    # Per-order resolucija (zanesljiva za nedavne MK račune, ki jih
+                    # bulk date-scan ne doseže). Najprej hitra povezava iz mk_bills,
+                    # nato iskanje v živo za preostala nepovezana naročila.
+                    from services.mk_service import mk_backfill_orders_bill_ids, mk_link_orders_missing_bills
+                    mk_backfill_orders_bill_ids(days=30)
+                    win = int(os.environ.get('MK_BILL_LINK_WINDOW_DAYS', '21') or 21)
+                    lim = int(os.environ.get('MK_BILL_LINK_LIMIT', '25') or 25)
+                    linked = mk_link_orders_missing_bills(days=win, limit=lim)
                     if linked:
                         app.logger.info(f"mk_bill_link_job: povezanih {linked} naročil z MK računi")
                 except Exception as e:

@@ -3650,6 +3650,105 @@ def mk_backfill_orders_bill_ids(days: int = 60) -> int:
         return 0
 
 
+def mk_link_orders_missing_bills(days: int = 21, limit: int = 25, per_order_budget_s: float = 15.0) -> int:
+    """Za nedavna fulfilled naročila brez `mk_bill_id` razreši MK račun v živo
+    in zapiše `orders.mk_bill_id` + `mk_bill_type`.
+
+    MK račun obstaja že ob fulfillmentu, a bulk date-scan (mk_sync_bills) pri
+    tem MK računu ne doseže nedavnih računov — per-order iskanje (mk_find_bill_*)
+    pa jih zanesljivo najde. Zato to uporabljamo za sprotno polnjenje, da je
+    status MK računa viden skoraj takoj (brez klika na PDF).
+
+    Omejeno z `limit` (št. naročil na klic) in `per_order_budget_s` (wall-clock
+    na naročilo), da ne preobremenimo MK API. Najnovejša naročila se obdelajo
+    najprej. Vrne število povezanih naročil.
+    """
+    try:
+        import time as _t
+        from database import get_db
+        db = get_db(); c = db.cursor()
+        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
+        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_type TEXT")
+        db.commit()
+        c.execute(
+            """
+            SELECT order_number, shopify_order_id
+            FROM orders
+            WHERE mk_bill_id IS NULL
+              AND COALESCE(fulfilled_at, shopify_fulfilled_at) IS NOT NULL
+              AND COALESCE(fulfilled_at, created_at) > NOW() - make_interval(days => %s)
+            ORDER BY COALESCE(fulfilled_at, created_at) DESC
+            LIMIT %s
+            """,
+            (int(days), int(limit)),
+        )
+        rows = c.fetchall() or []
+        types = _mk_sales_doc_types()
+        linked = 0
+        for r in rows:
+            od = r if isinstance(r, dict) else {'order_number': r[0], 'shopify_order_id': r[1]}
+            on = str(od.get('order_number') or '').strip()
+            if not on:
+                continue
+            mk_id = None
+            doc_type = None
+            try:
+                hit = mk_find_bill_in_db(on)
+                if hit and hit.get('mk_id'):
+                    mk_id, doc_type = str(hit['mk_id']), hit.get('doc_type')
+                if not mk_id:
+                    refs = [on]
+                    clean = on.lstrip('#')
+                    if clean and clean != on:
+                        refs.append(clean)
+                    sid = od.get('shopify_order_id')
+                    if sid:
+                        refs.append(str(sid))
+                    deadline = _t.monotonic() + float(per_order_budget_s)
+                    for ref in refs:
+                        if mk_id or _t.monotonic() > deadline:
+                            break
+                        for dt in types:
+                            if _t.monotonic() > deadline:
+                                break
+                            d = mk_find_bill_quick(dt, ref, limit=25)
+                            if d and d.get('mk_id'):
+                                mk_id, doc_type = str(d['mk_id']), d.get('_doc_type') or dt
+                                break
+            except Exception as _e:
+                current_app.logger.warning(f"mk_link_orders_missing_bills: {on}: {_e}")
+                continue
+            if not mk_id:
+                continue
+            try:
+                c.execute(
+                    "UPDATE orders SET mk_bill_id = %s, mk_bill_type = %s "
+                    "WHERE order_number = %s OR order_number = %s",
+                    (mk_id, doc_type or 'sales_bill_foreign', on, f"#{on.lstrip('#')}"),
+                )
+                db.commit()
+                linked += 1
+            except Exception as _ue:
+                current_app.logger.warning(f"mk_link_orders_missing_bills update {on}: {_ue}")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        try:
+            current_app.logger.info(
+                f"mk_link_orders_missing_bills: povezanih {linked}/{len(rows)} naročil"
+            )
+        except Exception:
+            pass
+        return linked
+    except Exception as e:
+        try:
+            current_app.logger.error(f"mk_link_orders_missing_bills error: {e}")
+        except Exception:
+            pass
+        return 0
+
+
 def mk_sync_bills_from_orders(days: int = 1, max_orders: int = 2000) -> int:
     """Import bills by iterating local orders from the last `days` and resolving their bills via search.
 
