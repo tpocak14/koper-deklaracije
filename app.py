@@ -153,6 +153,33 @@ def create_app():
                     app.logger.error(f"Napaka pri nočnem MK sync-u: {e}")
 
         scheduler.add_job(sync_mk_bills_job, 'cron', hour=3, minute=15)
+
+        # Pogost povezovalni job (vsakih 30 min): MK račun obstaja že ob
+        # fulfillmentu, zato kmalu po njem uvozimo nedavne račune (lahek scan)
+        # in jih povežemo z naročili (orders.mk_bill_id). Tako je status MK
+        # računa viden skoraj takoj, brez čakanja na nočni sync ali klik na PDF.
+        _disable_link = _disable_all or (os.environ.get('DISABLE_MK_BILL_LINK_JOB', '') or '').strip().lower() in ('1', 'true', 'yes')
+
+        def mk_bill_link_job():
+            with app.app_context():
+                try:
+                    from database import get_db as _get_db
+                    _get_db(background=True)
+                    from services.mk_service import mk_sync_bills, mk_backfill_orders_bill_ids
+                    days = int(os.environ.get('MK_BILL_LINK_SYNC_DAYS', '3') or 3)
+                    scan = int(os.environ.get('MK_BILL_LINK_MAX_SCAN', '500') or 500)
+                    mk_sync_bills(days=days, max_scan_per_type=scan, page_size=200)
+                    linked = mk_backfill_orders_bill_ids(days=30)
+                    if linked:
+                        app.logger.info(f"mk_bill_link_job: povezanih {linked} naročil z MK računi")
+                except Exception as e:
+                    app.logger.error(f"mk_bill_link_job error: {e}")
+
+        if not _disable_link:
+            _link_interval = int(os.environ.get('MK_BILL_LINK_INTERVAL_MIN', '30') or 30)
+            scheduler.add_job(mk_bill_link_job, 'interval', minutes=_link_interval)
+        else:
+            app.logger.warning("mk_bill_link_job DISABLED via env")
         
         # Nočni retail delta import (vsak dan ob 01:30)
         def retail_delta_job():
