@@ -33,11 +33,24 @@ from __future__ import annotations
 import os
 from typing import Any, Dict
 
-from flask import Blueprint, current_app, jsonify, request, session
+from flask import Blueprint, Response, current_app, jsonify, request, session
 from database import get_db
 
 
 internal_bp = Blueprint('internal', __name__, url_prefix='/api/internal')
+
+
+# Country code → (locale, country) za MK uradni PDF (mk_print_bill_pdf).
+# Skladno z mapiranjem v blueprints/api_routes.py (send-invoice).
+_MK_PDF_LOCALE_BY_CC = {
+    'SI': ('sl', 'si'), 'EN': ('en', 'gb'), 'GB': ('en', 'gb'), 'US': ('en', 'us'),
+    'DE': ('de', 'de'), 'AT': ('de', 'at'), 'IT': ('it', 'it'), 'HR': ('hr', 'hr'),
+    'SR': ('sr_RS', 'rs'), 'RS': ('sr_RS', 'rs'), 'BA': ('sr_ba', 'ba'),
+    'RO': ('ro_RO', 'ro'), 'PT': ('pt_PT', 'pt'), 'ES': ('es_ES', 'es'),
+    'CZ': ('cz_CZ', 'cz'), 'SK': ('sk_SK', 'sk'), 'HU': ('hu_HU', 'hu'),
+    'PL': ('pl_PL', 'pl'), 'MK': ('mk_MK', 'mk'), 'NL': ('nl', 'nl'),
+    'GR': ('gr', 'gr'), 'FR': ('fr', 'fr'), 'BG': ('bg', 'bg'),
+}
 
 
 def _is_authorized() -> bool:
@@ -188,6 +201,74 @@ def order_status(order_number: str):
             if hasattr(v, 'isoformat'):
                 out[k] = v.isoformat()
         return jsonify({'ok': True, 'order': out})
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# MK bill PDF (uradni račun iz MetaKocke)
+# ---------------------------------------------------------------------------
+
+@internal_bp.route('/mk/bill-pdf/<path:order_number>', methods=['GET'])
+def mk_bill_pdf(order_number: str):
+    """Vrne uradni PDF MK računa za dano naročilo (inline application/pdf).
+
+    Bere `mk_bill_id` + `mk_bill_type` iz orders in pokliče `mk_print_bill_pdf`.
+    Locale/country se določi iz `country_code` naročila. Če MK PDF ni na voljo,
+    vrne JSON napako (404/502), da app-v2 lahko prikaže smiselno sporočilo.
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    on = (order_number or '').strip()
+    if not on:
+        return jsonify({'ok': False, 'error': 'missing order_number'}), 400
+
+    db = get_db()
+    c = db.cursor()
+    try:
+        c.execute(
+            """
+            SELECT order_number, mk_bill_id, mk_bill_type, country_code
+            FROM orders
+            WHERE order_number = %s OR order_number = %s OR order_number = %s
+            LIMIT 1
+            """,
+            (on, on.lstrip('#'), f"#{on.lstrip('#')}"),
+        )
+        row = c.fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'order_not_found', 'order_number': on}), 404
+        r = dict(row) if not isinstance(row, dict) else row
+        mk_id = r.get('mk_bill_id')
+        if not mk_id:
+            return jsonify({'ok': False, 'error': 'mk_bill_missing', 'order_number': on}), 404
+
+        doc_type = r.get('mk_bill_type') or 'sales_bill_foreign'
+        cc = (r.get('country_code') or 'SI').upper()
+        locale_pair = _MK_PDF_LOCALE_BY_CC.get(cc, ('sl', 'si'))
+
+        from services.mk_service import mk_print_bill_pdf
+        pdf_bytes = mk_print_bill_pdf(
+            doc_type, str(mk_id), locale=locale_pair[0], country=locale_pair[1]
+        )
+        if not pdf_bytes:
+            return jsonify({'ok': False, 'error': 'mk_pdf_unavailable', 'order_number': on}), 502
+
+        clean = on.lstrip('#')
+        return Response(
+            pdf_bytes,
+            mimetype='application/pdf',
+            headers={
+                'Content-Disposition': f'inline; filename="racun_{clean}.pdf"',
+                'Cache-Control': 'no-store',
+            },
+        )
+    except Exception as e:
+        current_app.logger.error(f"/api/internal/mk/bill-pdf error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         try:
             c.close()
