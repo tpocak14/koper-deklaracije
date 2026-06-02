@@ -3650,6 +3650,50 @@ def mk_backfill_orders_bill_ids(days: int = 60) -> int:
         return 0
 
 
+def mk_bill_from_sales_order(mk_sales_order_id: str) -> Tuple[Optional[str], Optional[str]]:
+    """Razreši povezan prodajni račun (sales_bill_*) iz MK prodajnega naloga.
+
+    Zanesljiva pot za #SI naročila: MK `/search` NE filtrira po title/buyer_order
+    (vrne generičen seznam), zato iskanja računa po referenci ne moremo uporabiti.
+    Prodajni nalog (sales_order) pa v `doc_link_list` vsebuje povezan račun, npr.:
+        {"mk_id": "481000409636", "doc_type": "sales_bill_foreign"}
+
+    Vrne (bill_mk_id, bill_doc_type) ali (None, None). Prednost: foreign → domestic
+    → prepaid/retail/bill; dobropisi (credit_note) se izpustijo.
+    """
+    sid = str(mk_sales_order_id or '').strip()
+    if not sid:
+        return None, None
+    try:
+        doc = mk_get_document('sales_order', sid)
+    except Exception as e:
+        try:
+            current_app.logger.warning(f"mk_bill_from_sales_order get_document {sid}: {e}")
+        except Exception:
+            pass
+        return None, None
+    if not isinstance(doc, dict):
+        return None, None
+    links = doc.get('doc_link_list') or []
+    if not isinstance(links, list):
+        return None, None
+    candidates: List[Tuple[str, str]] = []
+    for ln in links:
+        if not isinstance(ln, dict):
+            continue
+        dt = str(ln.get('doc_type') or '')
+        mid = ln.get('mk_id')
+        if mid and dt.startswith('sales_bill') and 'credit' not in dt:
+            candidates.append((str(mid), dt))
+    if not candidates:
+        return None, None
+    for pref in ('sales_bill_foreign', 'sales_bill_domestic', 'sales_bill', 'sales_bill_prepaid', 'sales_bill_retail'):
+        for mid, dt in candidates:
+            if dt == pref:
+                return mid, dt
+    return candidates[0]
+
+
 def mk_link_orders_missing_bills(days: int = 21, limit: int = 25, per_order_budget_s: float = 15.0) -> int:
     """Za nedavna fulfilled naročila brez `mk_bill_id` razreši MK račun v živo
     in zapiše `orders.mk_bill_id` + `mk_bill_type`.
@@ -3672,7 +3716,7 @@ def mk_link_orders_missing_bills(days: int = 21, limit: int = 25, per_order_budg
         db.commit()
         c.execute(
             """
-            SELECT order_number, shopify_order_id
+            SELECT order_number, shopify_order_id, mk_sales_order_id
             FROM orders
             WHERE mk_bill_id IS NULL
               AND COALESCE(fulfilled_at, shopify_fulfilled_at) IS NOT NULL
@@ -3686,16 +3730,25 @@ def mk_link_orders_missing_bills(days: int = 21, limit: int = 25, per_order_budg
         types = _mk_sales_doc_types()
         linked = 0
         for r in rows:
-            od = r if isinstance(r, dict) else {'order_number': r[0], 'shopify_order_id': r[1]}
+            od = r if isinstance(r, dict) else {'order_number': r[0], 'shopify_order_id': r[1], 'mk_sales_order_id': r[2]}
             on = str(od.get('order_number') or '').strip()
             if not on:
                 continue
             mk_id = None
             doc_type = None
             try:
-                hit = mk_find_bill_in_db(on)
-                if hit and hit.get('mk_id'):
-                    mk_id, doc_type = str(hit['mk_id']), hit.get('doc_type')
+                # 1) Najzanesljivejša pot: prek prodajnega naloga → povezan račun.
+                #    MK /search ne filtrira po referenci, zato je za #SI naročila to
+                #    edina zanesljiva pot.
+                so_id = od.get('mk_sales_order_id')
+                if so_id:
+                    b_id, b_type = mk_bill_from_sales_order(str(so_id))
+                    if b_id:
+                        mk_id, doc_type = b_id, b_type
+                if not mk_id:
+                    hit = mk_find_bill_in_db(on)
+                    if hit and hit.get('mk_id'):
+                        mk_id, doc_type = str(hit['mk_id']), hit.get('doc_type')
                 if not mk_id:
                     refs = [on]
                     clean = on.lstrip('#')

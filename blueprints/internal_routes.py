@@ -95,16 +95,26 @@ def _resolve_mk_bill(c, row):
 
     on = (row.get('order_number') or '').strip()
     shop_id = row.get('shopify_order_id')
+    so_id = row.get('mk_sales_order_id')
     found = None
     try:
         import time as _t
         from services.mk_service import (
             mk_find_bill_in_db, mk_find_bill_quick, _mk_sales_doc_types,
+            mk_bill_from_sales_order,
         )
 
-        hit = mk_find_bill_in_db(on)
-        if hit and hit.get('mk_id'):
-            found = (str(hit['mk_id']), hit.get('doc_type') or 'sales_bill_foreign')
+        # 1) Najzanesljivejša pot za #SI naročila: prodajni nalog → povezan račun
+        #    (doc_link_list). MK /search ne filtrira po title/buyer_order.
+        if so_id:
+            b_id, b_type = mk_bill_from_sales_order(str(so_id))
+            if b_id:
+                found = (b_id, b_type or 'sales_bill_foreign')
+
+        if not found:
+            hit = mk_find_bill_in_db(on)
+            if hit and hit.get('mk_id'):
+                found = (str(hit['mk_id']), hit.get('doc_type') or 'sales_bill_foreign')
 
         if not found:
             deadline = _t.monotonic() + 22.0
@@ -304,7 +314,7 @@ def mk_bill_pdf(order_number: str):
     try:
         c.execute(
             """
-            SELECT order_number, shopify_order_id, mk_bill_id, mk_bill_type, country_code
+            SELECT order_number, shopify_order_id, mk_bill_id, mk_bill_type, mk_sales_order_id, country_code
             FROM orders
             WHERE order_number = %s OR order_number = %s OR order_number = %s
             LIMIT 1
@@ -377,7 +387,7 @@ def mk_bill_url(order_number: str):
     try:
         c.execute(
             """
-            SELECT order_number, shopify_order_id, mk_bill_id, mk_bill_type
+            SELECT order_number, shopify_order_id, mk_bill_id, mk_bill_type, mk_sales_order_id
             FROM orders
             WHERE order_number = %s OR order_number = %s OR order_number = %s
             LIMIT 1
