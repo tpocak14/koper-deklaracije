@@ -2615,62 +2615,66 @@ def _apply_procurement_from_bill(c, bill: Dict[str, Any]):
         if not items:
             return
 
-        _ensure_procurement_tables(c)
-        _ensure_proc_applied_table(c)
+        # Savepoint: morebitna napaka pri procurementu (npr. manjkajoča tabela
+        # proc_stock_movements) NE sme prekiniti zunanje transakcije (uvoz
+        # računov v mk_bills). Brez tega bi en sam fail aborti-ral cel scan.
+        with c.connection.transaction():
+            _ensure_procurement_tables(c)
+            _ensure_proc_applied_table(c)
 
-        # Aggregate quantities per SKU within the bill
-        sku_to_qty: Dict[str, int] = {}
-        for it in items:
-            # MK polja za SKU se razlikujejo med tipi; pokrij več variant
-            sku = str((it.get('product_code') or it.get('code') or it.get('count_code') or it.get('sku') or '')).strip().upper()
-            if not sku:
+            # Aggregate quantities per SKU within the bill
+            sku_to_qty: Dict[str, int] = {}
+            for it in items:
+                # MK polja za SKU se razlikujejo med tipi; pokrij več variant
+                sku = str((it.get('product_code') or it.get('code') or it.get('count_code') or it.get('sku') or '')).strip().upper()
+                if not sku:
+                    try:
+                        app_log('procurement.apply', 'info', 'SKU missing on bill item', {'mk_id': mk_id, 'item': str(it)[:160]})
+                    except Exception:
+                        pass
+                    continue
+                raw_qty = _to_int_quantity(it.get('quantity') or it.get('qty') or it.get('amount'))
+                qty = int(raw_qty)
+                if qty <= 0:
+                    continue
+                sku_to_qty[sku] = sku_to_qty.get(sku, 0) + qty
+
+            if not sku_to_qty:
+                return
+
+            from services.proc_stock import apply_decrement
+
+            for sku, qty in sku_to_qty.items():
+                c.execute("SELECT 1 FROM proc_applied_from_mk WHERE mk_id = %s AND sku = %s", (mk_id, sku))
+                if c.fetchone():
+                    continue
+                res = apply_decrement(
+                    c, sku, int(qty),
+                    source='mk_bill', source_ref=mk_id,
+                    note=f"bill {mk_id}"
+                )
+                if not res.get('applied'):
+                    continue
+                c.execute(
+                    """
+                    INSERT INTO proc_applied_from_mk (mk_id, sku, qty)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (mk_id, sku) DO NOTHING
+                    """,
+                    (mk_id, sku, int(qty))
+                )
                 try:
-                    app_log('procurement.apply', 'info', 'SKU missing on bill item', {'mk_id': mk_id, 'item': str(it)[:160]})
+                    app_log('procurement.apply', 'info', 'on_hand decrement (mk_bill)', {
+                        'mk_id': mk_id,
+                        'sku': sku,
+                        'qty': int(qty),
+                        'on_hand_before': res.get('on_hand_before'),
+                        'on_hand_after': res.get('on_hand_after'),
+                        'pending_before': res.get('pending_before'),
+                        'pending_after': res.get('pending_after'),
+                    })
                 except Exception:
                     pass
-                continue
-            raw_qty = _to_int_quantity(it.get('quantity') or it.get('qty') or it.get('amount'))
-            qty = int(raw_qty)
-            if qty <= 0:
-                continue
-            sku_to_qty[sku] = sku_to_qty.get(sku, 0) + qty
-
-        if not sku_to_qty:
-            return
-
-        from services.proc_stock import apply_decrement
-
-        for sku, qty in sku_to_qty.items():
-            c.execute("SELECT 1 FROM proc_applied_from_mk WHERE mk_id = %s AND sku = %s", (mk_id, sku))
-            if c.fetchone():
-                continue
-            res = apply_decrement(
-                c, sku, int(qty),
-                source='mk_bill', source_ref=mk_id,
-                note=f"bill {mk_id}"
-            )
-            if not res.get('applied'):
-                continue
-            c.execute(
-                """
-                INSERT INTO proc_applied_from_mk (mk_id, sku, qty)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (mk_id, sku) DO NOTHING
-                """,
-                (mk_id, sku, int(qty))
-            )
-            try:
-                app_log('procurement.apply', 'info', 'on_hand decrement (mk_bill)', {
-                    'mk_id': mk_id,
-                    'sku': sku,
-                    'qty': int(qty),
-                    'on_hand_before': res.get('on_hand_before'),
-                    'on_hand_after': res.get('on_hand_after'),
-                    'pending_before': res.get('pending_before'),
-                    'pending_after': res.get('pending_after'),
-                })
-            except Exception:
-                pass
     except Exception as e:
         current_app.logger.error(f"apply procurement from MK bill error: {e}")
 
