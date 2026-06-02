@@ -145,8 +145,8 @@ def _resolve_mk_bill(c, row):
 
     mk_id, doc_type = found
     try:
-        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
-        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_type TEXT")
+        # Stolpca mk_bill_id / mk_bill_type sta del sheme — brez ALTER TABLE
+        # na vroči poti (ACCESS EXCLUSIVE lock → lock pileup → 504).
         c.execute(
             "UPDATE orders SET mk_bill_id = %s, mk_bill_type = %s "
             "WHERE order_number = %s OR order_number = %s",

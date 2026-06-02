@@ -2058,13 +2058,8 @@ def _mk_send_invoice_in_background(app_obj, order_number: str, recipient_email: 
             try:
                 mk_id = bill.get('mk_id')
                 if mk_id:
-                    try:
-                        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
-                        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_type TEXT")
-                        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_publish_ts TIMESTAMP NULL")
-                        db.commit()
-                    except Exception:
-                        db.rollback()
+                    # Stolpci (mk_bill_id/type/publish_ts) so del sheme — brez ALTER
+                    # TABLE na poti zahteve (ACCESS EXCLUSIVE lock → lock pileup).
                     c.execute(
                         "UPDATE orders SET mk_bill_id = %s, mk_bill_type = %s, mk_publish_ts = COALESCE(%s, mk_publish_ts) WHERE order_number = %s OR order_number = %s",
                         (str(mk_id), bill.get('_doc_type') or 'sales_bill_domestic', bill.get('publish_ts'), f"#{order_number}", order_number)
@@ -6011,11 +6006,6 @@ def create_manual_order():
         oid = c.fetchone()[0]
         # opcijsko zapiši mk_bill_id
         if mk_id_opt:
-            try:
-                c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
-                db.commit()
-            except Exception:
-                db.rollback()
             c.execute("UPDATE orders SET mk_bill_id = %s WHERE id = %s", (mk_id_opt, oid))
         db.commit(); c.close()
         return jsonify({'success': True, 'order_number': order_number, 'id': oid})
@@ -6101,13 +6091,7 @@ def mk_import_order():
             (order_number, customer_email, customer_name, country_code, _json.dumps(norm_items))
         )
         oid = c2.fetchone()[0]
-        # Zapiši tudi mk bill reference (stolpci so opcijski)
-        try:
-            c2.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
-            c2.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_type TEXT")
-            db2.commit()
-        except Exception:
-            db2.rollback()
+        # Zapiši tudi mk bill reference (stolpci so del sheme — brez ALTER tukaj).
         c2.execute("UPDATE orders SET mk_bill_id = %s, mk_bill_type = %s WHERE id = %s", (mk_id, found_type or '', oid))
         db2.commit(); c2.close()
         return jsonify({'success': True, 'order_number': order_number, 'id': oid})

@@ -3602,8 +3602,8 @@ def mk_backfill_orders_bill_ids(days: int = 60) -> int:
     try:
         from database import get_db
         db = get_db(); c = db.cursor()
-        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
-        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_type TEXT")
+        # Brez ALTER TABLE na pogosti poti (job teče vsakih 30 min) — stolpca sta
+        # del sheme; ACCESS EXCLUSIVE lock bi povzročil lock pileup.
         c.execute(
             """
             WITH ranked AS (
@@ -3711,9 +3711,10 @@ def mk_link_orders_missing_bills(days: int = 21, limit: int = 25, per_order_budg
         import time as _t
         from database import get_db
         db = get_db(); c = db.cursor()
-        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_id TEXT")
-        c.execute("ALTER TABLE orders ADD COLUMN IF NOT EXISTS mk_bill_type TEXT")
-        db.commit()
+        # Opomba: stolpca mk_bill_id / mk_bill_type sta del sheme (migracije).
+        # ALTER TABLE tukaj NE izvajamo — vsak klic bi zahteval ACCESS EXCLUSIVE
+        # lock na vroči tabeli `orders` in ob soobstoju z idle-in-transaction
+        # background jobi povzroči lock pileup (cron 504).
         c.execute(
             """
             SELECT order_number, shopify_order_id, mk_sales_order_id
