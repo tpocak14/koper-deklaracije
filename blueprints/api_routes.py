@@ -5856,7 +5856,60 @@ def delete_serija(serija_id):
     
     try:
         db, cursor = get_db(), get_db().cursor()
+
+        # Pred brisanjem preberi podatke serije za morebitno povrnitev zaloge.
+        cursor.execute(
+            """
+            SELECT s.created_at, p.product_no, p.proizvajalec_id, pr.ime AS proizvajalec_ime
+            FROM serije s
+            JOIN parfumi p ON p.id = s.parfum_id
+            JOIN proizvajalci pr ON pr.id = p.proizvajalec_id
+            WHERE s.id = %s
+            """,
+            (serija_id,)
+        )
+        info = cursor.fetchone()
+
         cursor.execute("DELETE FROM serije WHERE id = %s", (serija_id,))
+
+        # --- Procurement: brisanje serije = plastenka se vrne v predal ---
+        # on_hand += 1; iz naročila (on_order_pending) odštejemo le, če je bila
+        # serija vnesena PO zadnjem oddanem naročilu (sicer je že v oddanem).
+        if info:
+            product_no = info['product_no'] if isinstance(info, dict) else info[1]
+            proizvajalec_id = info['proizvajalec_id'] if isinstance(info, dict) else info[2]
+            proizvajalec_ime = (info['proizvajalec_ime'] if isinstance(info, dict) else info[3] or '').upper()
+            created_at = info['created_at'] if isinstance(info, dict) else info[0]
+            if proizvajalec_ime in ('MISTRAL', 'FLORGARDEN'):
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO perfumes_stock (product_no, proizvajalec_id, on_hand, on_order_pending, on_order_committed)
+                        VALUES (%s, %s, 0, 0, 0)
+                        ON CONFLICT (product_no, proizvajalec_id) DO NOTHING
+                        """,
+                        (product_no, proizvajalec_id)
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE perfumes_stock
+                        SET on_hand = on_hand + 1,
+                            on_order_pending = CASE
+                                WHEN %s >= COALESCE(
+                                    (SELECT MAX(sent_at) FROM order_sends WHERE supplier_id = %s),
+                                    'epoch'::timestamptz
+                                )
+                                THEN GREATEST(0, on_order_pending - 1)
+                                ELSE on_order_pending
+                            END,
+                            updated_at = NOW()
+                        WHERE product_no = %s AND proizvajalec_id = %s
+                        """,
+                        (created_at, proizvajalec_id, product_no, proizvajalec_id)
+                    )
+                except Exception as pe:
+                    current_app.logger.error(f"Procurement stock update failed on serija delete: {pe}")
+
         db.commit()
         cursor.close()
         return jsonify({"message": "Serija uspešno izbrisana."})
