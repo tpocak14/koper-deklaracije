@@ -1454,6 +1454,13 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
     db = get_db(background=True)
     cursor = db.cursor()
 
+    # Trdi datumski floor: deklaracij za naročila ustvarjena PRED tem datumom
+    # NIKOLI ne pošljemo. Namen: trajno izključiti pred-junijski zaostanek
+    # (~259 + stara naročila), ne da bi morali mutirati tisoče vrstic. Naprej
+    # (od floor-a) teče normalno. Override / izklop prek env DECL_SEND_FLOOR_DATE
+    # (prazno = brez floor-a).
+    floor_date = (os.environ.get("DECL_SEND_FLOOR_DATE", "") or "").strip() or None
+
     stats = {
         "scanned": 0,
         "skipped_no_parfumov": 0,
@@ -1466,8 +1473,14 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
     }
 
     try:
+        params: List[Any] = [window_days]
+        floor_clause = ""
+        if floor_date:
+            floor_clause = " AND created_at >= %s::timestamptz"
+            params.append(floor_date)
+        params.append(batch_limit)
         cursor.execute(
-            """
+            f"""
             SELECT *
               FROM orders
              WHERE requires_declaration = TRUE
@@ -1476,10 +1489,11 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
                AND mk_return_detected_at IS NULL
                AND (shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL)
                AND created_at > NOW() - (%s || ' days')::interval
+               {floor_clause}
              ORDER BY shopify_fulfilled_at DESC NULLS LAST, fulfilled_at DESC NULLS LAST, created_at DESC
              LIMIT %s
             """,
-            (window_days, batch_limit)
+            tuple(params)
         )
         rows = cursor.fetchall()
 
