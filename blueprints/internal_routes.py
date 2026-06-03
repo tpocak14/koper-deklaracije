@@ -1139,3 +1139,77 @@ def migrate_025_mk_return_detection():
             c.close()
         except Exception:
             pass
+
+
+@internal_bp.route('/settings/status', methods=['GET'])
+def settings_status():
+    """Read-only pregled konfiguracije za /nastavitve (app-v2).
+
+    Vrne (vse samo za prikaz, brez skrivnosti):
+      - email_test_mode / admin_email iz app_settings (informativno; app-v2
+        jih bere/ureja tudi neposredno iz skupne baze),
+      - status forward-poslanja deklaracij (DECL_SEND_FLOOR_DATE,
+        DECL_AGED_SWEEP_ENABLED, SAFETY_NET_WINDOW_DAYS),
+      - ali sta MetaKocka in Mandrill povezana (na podlagi prisotnosti
+        env spremenljivk na Flask/Heroku, ki je avtoritativni posiljatelj).
+    """
+    if not _is_authorized():
+        return _unauthorized()
+
+    email_test_mode = None
+    admin_email_db = None
+    c = None
+    try:
+        c = get_db().cursor()
+        c.execute(
+            "SELECT key, value FROM app_settings "
+            "WHERE key IN ('email_test_mode', 'admin_email')"
+        )
+        for r in c.fetchall():
+            if r['key'] == 'email_test_mode':
+                email_test_mode = r['value']
+            elif r['key'] == 'admin_email':
+                admin_email_db = r['value']
+    except Exception as e:
+        current_app.logger.warning(f"settings_status: app_settings read failed: {e}")
+    finally:
+        try:
+            if c:
+                c.close()
+        except Exception:
+            pass
+
+    floor_date = (os.environ.get('DECL_SEND_FLOOR_DATE', '') or '').strip() or None
+    aged_sweep = (os.environ.get('DECL_AGED_SWEEP_ENABLED', '') or '').strip().lower() in (
+        '1', 'true', 'yes', 'on'
+    )
+    try:
+        window_days = int(os.environ.get('SAFETY_NET_WINDOW_DAYS', '7') or 7)
+    except Exception:
+        window_days = 7
+
+    mk_company = (os.environ.get('MK_COMPANY_ID') or '').strip()
+    mk_secret = (os.environ.get('MK_API_KEY') or os.environ.get('MK_SECRET_KEY') or '').strip()
+    mk_base = (os.environ.get('MK_API_BASE') or 'https://main.metakocka.si/rest/eshop/v1').strip()
+    mandrill_key = (os.environ.get('MANDRILL_API_KEY') or '').strip()
+
+    return jsonify({
+        'ok': True,
+        'email_test_mode': email_test_mode,
+        'admin_email': admin_email_db,
+        'declaration': {
+            'send_floor_date': floor_date,
+            'aged_sweep_enabled': aged_sweep,
+            'safety_net_window_days': window_days,
+        },
+        'metakocka': {
+            'configured': bool(mk_company and mk_secret),
+            'company_id': mk_company or None,
+            'api_base': mk_base or None,
+        },
+        'mandrill': {
+            'configured': bool(mandrill_key),
+            'from_email': 'orders@amourparfums.com',
+            'from_name': 'AMOUR Parfums',
+        },
+    })
