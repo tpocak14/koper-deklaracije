@@ -1213,3 +1213,175 @@ def settings_status():
             'from_name': 'AMOUR Parfums',
         },
     })
+
+
+# ---------------------------------------------------------------------------
+# Ročno pošiljanje & tisk deklaracij (app-v2 proxy)
+# ---------------------------------------------------------------------------
+#
+# Tri interne (Bearer) različice obstoječih session-zaščitenih route-ov v
+# api_routes.py (/poslji-rocno, /generiraj-deklaracijo-za-tisk,
+# /generiraj-pdf-rocno). Generiranje PDF/HTML in pošiljanje e-pošte ostane v
+# Flasku (wkhtmltopdf + email_service + poslovna pravila INCI/serije/rok),
+# app-v2 pa jih le proxyja. `perfumes` je seznam `parfumi.id` (integers).
+
+
+def _napaka_manjkajoci_parfumi(missing: list) -> str:
+    return (
+        "Ne morem ustvariti deklaracije. Naslednji parfumi imajo probleme:\n\n"
+        + "\n".join(missing)
+    )
+
+
+@internal_bp.route('/manual/send-email', methods=['POST'])
+def manual_send_email():
+    """Ročno pošiljanje deklaracije po e-pošti (app-v2 → Flask).
+
+    Body: { "email": str, "perfumes": [int, ...] }
+    Vrne: { ok, message } ob uspehu, sicer { ok: false, error }.
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    data = request.get_json(silent=True) or {}
+    email = (data.get('email') or '').strip()
+    perfume_ids = data.get('perfumes')
+    if not email or not perfume_ids:
+        return jsonify({'ok': False, 'error': 'Manjka email ali seznam parfumov.'}), 400
+
+    db = get_db(background=True)
+    cursor = db.cursor()
+    try:
+        from blueprints.api_routes import _pridobi_podatke_za_rocno_deklaracijo
+        from services.pdf_service import ustvari_pdf
+        from services.email_service import poslji_email_s_pdf
+
+        perfumes_data, missing, warnings = _pridobi_podatke_za_rocno_deklaracijo(perfume_ids, cursor)
+        if missing:
+            return jsonify({'ok': False, 'error': _napaka_manjkajoci_parfumi(missing)}), 400
+
+        manual_line_items = [{
+            'title': p.get('title', 'N/A'),
+            'quantity': 1,
+            'price': 0.0,
+            'image_url': 'https://cdn.shopify.com/s/files/1/0533/2089/files/placeholder-images-image_large.png?v=1529089297',
+        } for p in perfumes_data]
+
+        pdf_path, pdf_msg = ustvari_pdf(perfumes_data, manual_line_items, 'SI', None, warnings)
+        if not pdf_path:
+            return jsonify({'ok': False, 'error': pdf_msg or 'Napaka pri ustvarjanju PDF-ja.'}), 500
+
+        try:
+            email_success = poslji_email_s_pdf(
+                recipient_email=email,
+                order_number=None,
+                shopify_order_id=None,
+                pdf_path=pdf_path,
+                declaration_items=perfumes_data,
+                status_url=None,
+                shop_url=f"https://{current_app.config['SHOP_NAME']}.myshopify.com",
+                country_code='SI',
+                line_items=manual_line_items,
+                skip_test_redirect=True,
+            )
+        finally:
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except Exception:
+                    pass
+
+        if email_success:
+            return jsonify({'ok': True, 'message': 'Email uspešno poslan!'})
+        return jsonify({'ok': False, 'error': 'Napaka pri pošiljanju emaila.'}), 500
+    except Exception as e:
+        current_app.logger.error(f"/api/internal/manual/send-email error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+
+@internal_bp.route('/manual/print-html', methods=['POST'])
+def manual_print_html():
+    """Vrne HTML deklaracije za POS tisk (72mm). Body: { "perfumes": [int] }."""
+    if not _is_authorized():
+        return _unauthorized()
+    data = request.get_json(silent=True) or {}
+    perfume_ids = data.get('perfumes')
+    if not perfume_ids:
+        return jsonify({'ok': False, 'error': 'Manjka seznam parfumov.'}), 400
+
+    db = get_db(background=True)
+    cursor = db.cursor()
+    try:
+        from blueprints.api_routes import _pridobi_podatke_za_rocno_deklaracijo
+        from flask import render_template
+
+        perfumes_data, missing, warnings = _pridobi_podatke_za_rocno_deklaracijo(perfume_ids, cursor)
+        if missing:
+            return jsonify({'ok': False, 'error': _napaka_manjkajoci_parfumi(missing)}), 400
+
+        html = render_template('print_template.html', perfumes=perfumes_data, expiration_warnings=warnings)
+        return Response(html, mimetype='text/html', headers={'Cache-Control': 'no-store'})
+    except Exception as e:
+        current_app.logger.error(f"/api/internal/manual/print-html error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+
+@internal_bp.route('/manual/pdf', methods=['POST'])
+def manual_pdf():
+    """Vrne A4 PDF deklaracije (inline application/pdf). Body: { "perfumes": [int] }."""
+    if not _is_authorized():
+        return _unauthorized()
+    data = request.get_json(silent=True) or {}
+    perfume_ids = data.get('perfumes')
+    if not perfume_ids:
+        return jsonify({'ok': False, 'error': 'Manjka seznam parfumov.'}), 400
+
+    db = get_db(background=True)
+    cursor = db.cursor()
+    try:
+        from blueprints.api_routes import _pridobi_podatke_za_rocno_deklaracijo
+        from services.pdf_service import ustvari_pdf
+
+        perfumes_data, missing, warnings = _pridobi_podatke_za_rocno_deklaracijo(perfume_ids, cursor)
+        if missing:
+            return jsonify({'ok': False, 'error': _napaka_manjkajoci_parfumi(missing)}), 400
+
+        pdf_path, message = ustvari_pdf(perfumes_data, None, 'SI', None, warnings)
+        if not pdf_path:
+            return jsonify({'ok': False, 'error': message or 'Napaka pri ustvarjanju PDF-ja.'}), 500
+
+        try:
+            with open(pdf_path, 'rb') as f:
+                pdf_bytes = f.read()
+        finally:
+            if os.path.exists(pdf_path):
+                try:
+                    os.remove(pdf_path)
+                except Exception:
+                    pass
+
+        return Response(
+            pdf_bytes,
+            mimetype='application/pdf',
+            headers={
+                'Content-Disposition': 'inline; filename="deklaracija.pdf"',
+                'Cache-Control': 'no-store',
+            },
+        )
+    except Exception as e:
+        current_app.logger.error(f"/api/internal/manual/pdf error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
