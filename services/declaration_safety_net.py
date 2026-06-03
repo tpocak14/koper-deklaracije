@@ -1514,6 +1514,33 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
     return stats
 
 
+def run_aged_unsent_sweep_job(
+    window_days: int = 45, batch_limit: int = 150
+) -> Dict[str, Any]:
+    """Dnevni "aged sweep": ujame naročila, ki so ostarela izven urnega
+    safety-net okna (7 dni), a so še vedno completed + pripravljena, a NISO
+    poslana (mandrill_safety_message_id IS NULL).
+
+    Ozadje (2026-06-03): zaradi 6-dnevne vrzeli ob preklopu (27.5.–1.6.) +
+    ozkega 7-dnevnega okna je ~259 zaključenih naročil ostalo brez poslane
+    deklaracije in jih urni job ni nikoli več pobral. Ta job s širokim oknom
+    poskrbi, da takšni "stragglerji" ne ostanejo trajno spregledani.
+
+    Varnost: pošiljanje teče skozi isti send_declaration_via_mandrill, ki naredi
+    `full_email` + template idempotency cross-check, zato že-poslana naročila NE
+    dobijo dvojnika (označijo se kot sent_externally).
+
+    Job je v app.py privzeto IZKLOPLJEN (env DECL_AGED_SWEEP_ENABLED); vklopi se
+    namerno, ko želimo obdelati obstoječi zaostanek.
+    """
+    logger.info("Aged unsent sweep START (window_days=%d, batch=%d)",
+                window_days, batch_limit)
+    stats = run_safety_net_job(window_days=window_days, batch_limit=batch_limit)
+    logger.info("Aged unsent sweep DONE: %s",
+                {k: v for k, v in stats.items() if k != "details"})
+    return stats
+
+
 def run_backfill_blocked_orders_job(
     window_days: int = 30,
     batch_limit: int = 200,
@@ -1665,176 +1692,83 @@ def run_backfill_blocked_orders_job(
     return stats
 
 
-def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> Dict[str, Any]:
-    """Layer 2: Scan Mandrill log za naročila, ki "izgledajo OK" ampak NISO bila poslana.
+def _mandrill_search_email(email: str, date_from: str, date_to: str,
+                           max_retries: int = 4):
+    """full_email iskanje z backoff-om na 429 (Mandrill rate-limit).
+
+    POMEMBNO: Mandrill `/messages/search` NE podpira `template:` ali `subject:`
+    kot filter (vrne prazno). Edino zanesljivo filtriranje je `full_email:<email>`,
+    rezultat pa filtriramo po template/subject v Pythonu.
+    """
+    from services import mandrill_service as mc
+    import time as _t
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return mc.messages_search(
+                query=f"full_email:{email}", date_from=date_from,
+                date_to=date_to, limit=50,
+            )
+        except Exception as e:  # MandrillError ipd.
+            last_exc = e
+            if "429" in str(e) or "Too Many Requests" in str(e):
+                _t.sleep(4 * (attempt + 1))
+                continue
+            raise
+    if last_exc:
+        raise last_exc
+    return []
+
+
+def run_mandrill_log_audit_job(days_back: int = 12, batch_limit: int = 80) -> Dict[str, Any]:
+    """Layer 2: per-email cross-check Mandrill log za naročila, ki "izgledajo OK"
+    (mk_decl_uploaded_at NOT NULL) ampak Mandrill NIMA poslane deklaracije.
 
     Cilj:
       - V Flasku misli, da je mk_decl_uploaded_at NOT NULL → upload OK
-      - V resnici je MK Mandrill trigger pobegnil zaradi manjkajoče priponke
-        (ker je Flask priponko dal na sales_bill_*, ne sales_order)
-      - Mandrill log NIMA send-a za to naročilo
-      - Stranka ni dobila deklaracije
+      - V resnici Mandrill log NIMA send-a (MK trigger pobegnil / cutover vrzel)
+      - Stranka ni dobila deklaracije → označi za safety net retry
 
-    Algoritem:
-      1. Pridobi Mandrill log za zadnjih `days_back` dni (template=deklaracije-si)
-         in iz `metadata.order_id` ali `email + ts` izvleci že-poslana naročila.
-      2. Pridobi DB kandidate (mk_decl_uploaded_at NOT NULL,
-         mandrill_safety_message_id IS NULL, created_at v 14 dneh, fulfilled).
-      3. Za vsakega, ki ni v Mandrill log set-u, sproži safety net process.
+    POPRAVEK (2026-06-03):
+      Prejšnja izvedba je delala bulk `messages_search(query="subject:deklaracij
+      OR template:deklaracije")`. Mandrill teh filtrov NE podpira → vedno je
+      vrnil 0 → job ni naredil nič in vrzeli ni nikoli zaznal. Zdaj uporabljamo
+      per-naročilo `full_email:<email>` (zanesljivo, kot v
+      send_declaration_via_mandrill) in rezultat filtriramo po template/subject.
 
-    Pomembno: ta job sproži samo `mark_missing_mandrill`, ne pa direktnega send-a.
-    Send opravi `run_safety_net_job` naslednji cikel. Ločitev za varnost.
+    Za vsako naročilo:
+      - deklaracija najdena (state != rejected/invalid) → cache mandrill_safety_*
+        (da je idempotentno; aged-sweep je ne bo več obravnaval)
+      - deklaracija zavrnjena (rejected/invalid) → reset za retry
+      - deklaracije NI → označi za safety net (reset mk_decl_uploaded_at)
+
+    Ta job NE pošilja sam — le označi/cache-a. Send opravi safety_net /
+    aged-sweep job. Throttle (sleep) + 429 backoff omejita Mandrill rate-limit.
 
     Args:
-        days_back: koliko dni nazaj scan-amo (Mandrill log retention je ~30d)
-        batch_limit: max DB kandidatov, ki jih obdelamo v enem klicu
-
-    Returns: stats dict
+        days_back: koliko dni nazaj (Mandrill log retention je ~30d)
+        batch_limit: max DB kandidatov v enem zagonu
     """
+    import time as _t
+    from datetime import timedelta as _td
+
+    REJECTED_STATES = {"rejected", "invalid"}
     db = get_db(background=True)
     cursor = db.cursor()
 
     stats = {
-        "mandrill_msgs_scanned": 0,
         "db_candidates": 0,
         "mandrill_known_sent": 0,
-        "mandrill_rejected": 0,  # Layer 2b: explicit Mandrill rejections
+        "mandrill_rejected": 0,
         "candidates_missing_mandrill": 0,
         "marked_for_safety_net": 0,
+        "cached_already_sent": 0,
         "errors": 0,
         "details": [],
-        "rejected_details": [],  # explicit "rejected"/"invalid" iz Mandrill
+        "rejected_details": [],
     }
 
     try:
-        # Step 1: pull Mandrill log
-        from datetime import timedelta as _td
-        date_from = (datetime.now() - _td(days=days_back)).strftime("%Y-%m-%d")
-        date_to = (datetime.now() + _td(days=1)).strftime("%Y-%m-%d")
-
-        # Hranimo po-template mape, ker je SAMI SI MK-jev "default" za vse
-        # kupce; kupcu v DE/AT/HR/... velja "že poslano" le, če je bil
-        # poslan ustrezen jezikovni template (`deklaracije-de`, ...).
-        sent_order_ids_by_template: Dict[str, set] = {}
-        sent_emails_ts_by_template: Dict[str, List[Tuple[str, int]]] = {}
-        # Layer 2b: eksplicitni Mandrill rejection-i (npr. "Attachment is required,
-        # mail skipped" iz MK trigger-ja). Te moramo aktivno re-sendati, ker
-        # Mandrill pove jasno: ta email NI bil poslan.
-        REJECTED_STATES = {"rejected", "invalid"}
-        rejected_records: List[Dict[str, Any]] = []
-
-        try:
-            from services import mandrill_service as mc
-            # Široko iskanje: ne filtriramo po senderju, ker MK uporablja
-            # drugačno sender adreso od naše app. Filtriramo po template-u
-            # v Python-u spodaj (deklaracije-*).
-            # Iteriraj v paginih (Mandrill default limit ~1000)
-            for page_start in range(0, 5):  # max 5000 zapisov
-                msgs = mc.messages_search(
-                    query="subject:deklaracij OR template:deklaracije",
-                    date_from=date_from, date_to=date_to, limit=1000,
-                )
-                if not msgs:
-                    break
-                for m in msgs:
-                    template = (m.get("template") or "").lower().strip()
-                    subj = (m.get("subject") or "").lower()
-                    if "deklaracije" not in template and "deklaracij" not in subj:
-                        continue
-                    stats["mandrill_msgs_scanned"] += 1
-                    state = (m.get("state") or "").lower().strip()
-                    # Normaliziraj template slug (npr. 'deklaracije-si').
-                    tpl_key = template or "deklaracije-unknown"
-                    md = m.get("metadata") or {}
-                    oid = str(md.get("order_id") or "").lstrip("#").strip()
-                    email = (m.get("email") or "").lower()
-                    ts = m.get("ts") or 0
-
-                    if state in REJECTED_STATES:
-                        # Mandrill je zavrnil send — to je False positive!
-                        # Beležimo za alert in retry.
-                        stats["mandrill_rejected"] += 1
-                        rejected_records.append({
-                            "order_id": oid,
-                            "email": email,
-                            "ts": int(ts) if ts else 0,
-                            "state": state,
-                            "template": tpl_key,
-                            "reject_reason": m.get("reject_reason") or "",
-                            "subject": m.get("subject") or "",
-                            "_id": m.get("_id") or "",
-                        })
-                        # Ne dodajamo v sent_* mape — to je smisel rejected
-                        continue
-
-                    if oid:
-                        sent_order_ids_by_template.setdefault(tpl_key, set()).add(oid)
-                    if email and ts:
-                        sent_emails_ts_by_template.setdefault(tpl_key, []).append(
-                            (email, int(ts))
-                        )
-                if len(msgs) < 1000:
-                    break
-        except Exception as e:
-            logger.exception("Mandrill bulk pull failed: %s", e)
-            stats["errors"] += 1
-            return stats
-
-        # Layer 2b: za vsak rejected message → marker za safety net retry.
-        # Tako stranke s "Attachment is required" napako dobijo PDF preko naše
-        # poti (smart retry).
-        for rec in rejected_records:
-            oid = rec.get("order_id") or ""
-            if not oid:
-                # Brez order_id ne moremo zanesljivo matchat → samo loggamo
-                logger.warning(
-                    "Mandrill rejected message (no order_id metadata): "
-                    "email=%s state=%s reason=%s _id=%s",
-                    rec.get("email"), rec.get("state"),
-                    rec.get("reject_reason"), rec.get("_id"),
-                )
-                stats["rejected_details"].append(rec)
-                continue
-            try:
-                # Zazri po čistem in #-prefiksanem order_number
-                cursor.execute(
-                    """
-                    UPDATE orders SET
-                        mk_decl_upload_checked_at = COALESCE(mk_decl_upload_checked_at, mk_decl_uploaded_at, NOW()),
-                        mk_decl_uploaded_at = NULL,
-                        mandrill_safety_status = 'mk_rejected_attachment',
-                        pdf_generation_blocked_reason = NULL,
-                        pdf_generation_blocked_codes = NULL,
-                        pdf_generation_blocked_parfumi = NULL
-                      WHERE (order_number = %s OR order_number = %s)
-                        AND mandrill_safety_message_id IS NULL
-                    """,
-                    (oid, f"#{oid}")
-                )
-                if cursor.rowcount > 0:
-                    stats["rejected_details"].append({
-                        **rec,
-                        "action": "marked_for_retry",
-                        "rows_updated": cursor.rowcount,
-                    })
-                    logger.warning(
-                        "Mandrill REJECTED %s (%s, reason=%s) → marked for safety net retry",
-                        oid, rec.get("state"), rec.get("reject_reason"),
-                    )
-                else:
-                    stats["rejected_details"].append({
-                        **rec,
-                        "action": "already_sent_or_not_found",
-                    })
-            except Exception as e:
-                logger.warning("Failed to mark rejected %s for retry: %s", oid, e)
-                stats["errors"] += 1
-
-        stats["mandrill_known_sent"] = sum(
-            len(s) for s in sent_order_ids_by_template.values()
-        ) + sum(len(s) for s in sent_emails_ts_by_template.values())
-
-        # Step 2: DB kandidati
         cursor.execute(
             """
             SELECT id, order_number, customer_email, country_code, fulfilled_at,
@@ -1853,47 +1787,108 @@ def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> D
         candidates = cursor.fetchall()
         stats["db_candidates"] = len(candidates)
 
-        # Step 3: identify missing — match po **jezikovno ustreznem** template-u
         for row in candidates:
             d = dict(row) if not isinstance(row, dict) else row
             order_no_clean = str(d["order_number"] or "").lstrip("#").strip()
-            email = (d.get("customer_email") or "").lower()
-
-            # Target template glede na državo kupca (npr. AT → deklaracije-de).
-            target_tpl_name = pick_declaration_template_name(d.get("country_code"))
-            target_tpl_slug = target_tpl_name.replace("_", "-")
-
-            # Match by order_id v PRAVEM jeziku
-            if order_no_clean in sent_order_ids_by_template.get(target_tpl_slug, set()):
+            email = (d.get("customer_email") or "").strip().lower()
+            if not email:
                 continue
 
-            # Fallback: match po email + ts window (within 7d of fulfillment),
-            # spet le v jezikovno ustreznem template-u
+            target_tpl_slug = pick_declaration_template_name(
+                d.get("country_code")
+            ).replace("_", "-")
+
             fulfilled = d.get("shopify_fulfilled_at") or d.get("fulfilled_at")
-            matched_by_email = False
-            if email and fulfilled:
-                try:
-                    f_ts = int(fulfilled.timestamp()) if hasattr(fulfilled, "timestamp") else 0
-                    for (m_email, m_ts) in sent_emails_ts_by_template.get(target_tpl_slug, []):
-                        if m_email == email and abs(m_ts - f_ts) < 7 * 86400:
-                            matched_by_email = True
-                            break
-                except Exception:
-                    pass
-            if matched_by_email:
+            if fulfilled and hasattr(fulfilled, "strftime"):
+                date_from = (fulfilled - _td(days=5)).strftime("%Y-%m-%d")
+                date_to = (fulfilled + _td(days=20)).strftime("%Y-%m-%d")
+            else:
+                date_from = (datetime.now() - _td(days=days_back + 5)).strftime("%Y-%m-%d")
+                date_to = (datetime.now() + _td(days=1)).strftime("%Y-%m-%d")
+
+            _t.sleep(1.5)  # throttle proti Mandrill rate-limitu
+            try:
+                msgs = _mandrill_search_email(email, date_from, date_to)
+            except Exception as e:
+                logger.warning("Mandrill search failed for %s (%s): %s",
+                               d.get("order_number"), email, e)
+                stats["errors"] += 1
                 continue
 
-            # Candidate is missing in Mandrill log
+            sent_msg = None
+            rejected_msg = None
+            for m in msgs or []:
+                tpl = (m.get("template") or "").lower()
+                subj = (m.get("subject") or "").lower()
+                if "deklaracij" not in tpl and "deklaracij" not in subj:
+                    continue
+                state = (m.get("state") or "").lower().strip()
+                if state in REJECTED_STATES:
+                    rejected_msg = m
+                else:
+                    sent_msg = m
+                    break
+
+            if sent_msg is not None:
+                # Deklaracija JE šla ven (naša app ali MK trigger). Cache-aj,
+                # da je idempotentno in da aged-sweep ne pošlje znova.
+                stats["mandrill_known_sent"] += 1
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE orders SET
+                            mandrill_safety_message_id = COALESCE(mandrill_safety_message_id, %s),
+                            mandrill_safety_status = COALESCE(mandrill_safety_status, %s),
+                            mandrill_safety_attempted_at = COALESCE(mandrill_safety_attempted_at, NOW())
+                          WHERE id = %s
+                        """,
+                        (sent_msg.get("_id"),
+                         sent_msg.get("state") or "sent_externally",
+                         d["id"]),
+                    )
+                    stats["cached_already_sent"] += 1
+                except Exception as e:
+                    logger.warning("Cache already-sent failed for %s: %s",
+                                   d.get("order_number"), e)
+                    stats["errors"] += 1
+                continue
+
+            if rejected_msg is not None:
+                stats["mandrill_rejected"] += 1
+                stats["rejected_details"].append({
+                    "order_number": d.get("order_number"),
+                    "email": email,
+                    "state": (rejected_msg.get("state") or "").lower(),
+                    "reject_reason": rejected_msg.get("reject_reason") or "",
+                })
+                try:
+                    cursor.execute(
+                        """
+                        UPDATE orders SET
+                            mk_decl_upload_checked_at = COALESCE(mk_decl_upload_checked_at, mk_decl_uploaded_at, NOW()),
+                            mk_decl_uploaded_at = NULL,
+                            mandrill_safety_status = 'mk_rejected_attachment',
+                            pdf_generation_blocked_reason = NULL,
+                            pdf_generation_blocked_codes = NULL,
+                            pdf_generation_blocked_parfumi = NULL
+                          WHERE id = %s
+                        """,
+                        (d["id"],),
+                    )
+                    stats["marked_for_safety_net"] += 1
+                except Exception as e:
+                    logger.warning("Mark rejected %s failed: %s",
+                                   d.get("order_number"), e)
+                    stats["errors"] += 1
+                continue
+
+            # Deklaracije NI v Mandrill logu → označi za safety net retry.
             stats["candidates_missing_mandrill"] += 1
             stats["details"].append({
                 "order_number": d["order_number"],
                 "email": email,
                 "mk_decl_uploaded_at": str(d.get("mk_decl_uploaded_at")),
             })
-
-            # Mark for safety net: reset mk_decl_uploaded_at so safety_net_job
-            # will pick this order on next run (and send Mandrill directly).
-            # Pomembno: ohranimo zgodovino z mk_decl_upload_checked_at.
             try:
                 cursor.execute(
                     """
@@ -1905,13 +1900,15 @@ def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> D
                         pdf_generation_blocked_parfumi = NULL
                       WHERE id = %s
                     """,
-                    (d["id"],)
+                    (d["id"],),
                 )
                 stats["marked_for_safety_net"] += 1
             except Exception as e:
                 logger.warning("Failed to mark %s for safety net: %s",
                                d.get("order_number"), e)
                 stats["errors"] += 1
+
+            db.commit()
 
         db.commit()
     except Exception as e:
@@ -1922,7 +1919,7 @@ def run_mandrill_log_audit_job(days_back: int = 10, batch_limit: int = 100) -> D
         cursor.close()
 
     logger.info("Mandrill audit job done: %s",
-                {k: v for k, v in stats.items() if k != "details"})
+                {k: v for k, v in stats.items() if k not in ("details", "rejected_details")})
     return stats
 
 

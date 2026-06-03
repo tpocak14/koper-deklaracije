@@ -246,6 +246,35 @@ def create_app():
         if not _disable_safety:
             scheduler.add_job(mandrill_verify_job, 'interval', minutes=60)
 
+        # Aged unsent sweep (1x dnevno): ujame naročila, ki so ostarela izven
+        # urnega 7-dnevnega okna, a so še vedno completed + pripravljena in
+        # NISO poslana. Privzeto IZKLOPLJEN (DECL_AGED_SWEEP_ENABLED), ker bi
+        # sicer ob prvem zagonu poslal obstoječi zaostanek (~259) brez potrditve.
+        # Ko želimo zaostanek obdelati: nastavi DECL_AGED_SWEEP_ENABLED=1.
+        def aged_unsent_sweep_job():
+            with app.app_context():
+                try:
+                    from services.declaration_safety_net import run_aged_unsent_sweep_job
+                    window = int(os.environ.get('DECL_AGED_SWEEP_WINDOW_DAYS', '45') or 45)
+                    batch = int(os.environ.get('DECL_AGED_SWEEP_BATCH_LIMIT', '150') or 150)
+                    res = run_aged_unsent_sweep_job(window_days=window, batch_limit=batch)
+                    app.logger.info(
+                        "aged_unsent_sweep_job done: scanned=%d, sent=%d, "
+                        "waiting=%d, blocked=%d, returned=%d, errors=%d",
+                        res['scanned'], res['uploaded_and_mandrill'],
+                        res['uploaded_mk_only'], res['blocked'],
+                        res['returned'], res['errors'],
+                    )
+                except Exception as e:
+                    app.logger.error(f"aged_unsent_sweep_job error: {e}", exc_info=True)
+
+        _enable_aged_sweep = (os.environ.get('DECL_AGED_SWEEP_ENABLED', '') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+        if not _disable_safety and _enable_aged_sweep:
+            scheduler.add_job(aged_unsent_sweep_job, 'cron', hour=22, minute=30, timezone=lj)
+            app.logger.info("aged_unsent_sweep_job ENABLED (daily 22:30)")
+        else:
+            app.logger.info("aged_unsent_sweep_job disabled (set DECL_AGED_SWEEP_ENABLED=1 to enable)")
+
         # Layer 2 audit (2x dnevno ob 06:00 in 18:00): scan Mandrill log za
         # naročila, ki "izgledajo OK" v Flasku ampak NISO dejansko poslana.
         # Označi te kot kandidate za safety net (reset mk_decl_uploaded_at).
@@ -253,12 +282,14 @@ def create_app():
             with app.app_context():
                 try:
                     from services.declaration_safety_net import run_mandrill_log_audit_job
-                    res = run_mandrill_log_audit_job(days_back=10, batch_limit=100)
+                    res = run_mandrill_log_audit_job(days_back=12, batch_limit=80)
                     app.logger.info(
-                        "mandrill_log_audit_job done: mandrill_scanned=%d, db_candidates=%d, "
-                        "missing=%d, marked_for_safety_net=%d, errors=%d",
-                        res['mandrill_msgs_scanned'], res['db_candidates'],
-                        res['candidates_missing_mandrill'], res['marked_for_safety_net'],
+                        "mandrill_log_audit_job done: db_candidates=%d, known_sent=%d, "
+                        "cached_already_sent=%d, missing=%d, rejected=%d, "
+                        "marked_for_safety_net=%d, errors=%d",
+                        res['db_candidates'], res['mandrill_known_sent'],
+                        res['cached_already_sent'], res['candidates_missing_mandrill'],
+                        res['mandrill_rejected'], res['marked_for_safety_net'],
                         res['errors'],
                     )
                 except Exception as e:
