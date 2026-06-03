@@ -252,6 +252,90 @@ def _shopify_get_with_retry(url: str, *, max_retries: int = 5, timeout: int = 20
     resp.raise_for_status()
     return resp
 
+
+def _shopify_post_with_retry(
+    url: str,
+    *,
+    json_body: dict,
+    max_retries: int = 4,
+    timeout: int = 25,
+    shop_domain: str | None = None,
+) -> requests.Response:
+    """POST (GraphQL) z retry/backoff za Shopify 429/5xx in prehodne
+    transportne napake (timeout, connection reset) + rate pacing.
+
+    Pomembno za pridobivanje deklaracijskih metafield-ov: brez retryja je en
+    sam timeout pomenil prazen rezultat in lažno blokado naročila
+    (`pdf_generation_blocked_reason = "Shopify ni vrnil podatkov..."`).
+
+    Vrže requests.exceptions.RequestException, če po vseh poskusih ne uspe.
+    """
+    backoff = 1.0
+    last_exc = None
+    for attempt in range(max_retries):
+        _respect_rate_limit_before_request()
+        try:
+            resp = requests.post(
+                url,
+                json=json_body,
+                headers=_get_shopify_headers(shop_domain),
+                timeout=timeout,
+            )
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+            current_app.logger.warning(
+                f"Shopify POST transport napaka za {url} "
+                f"(poskus {attempt+1}/{max_retries}): {e}"
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 8.0)
+            continue
+
+        if resp.status_code == 429:
+            ra = resp.headers.get('Retry-After')
+            try:
+                delay = float(ra)
+            except Exception:
+                delay = max(2.0, backoff)
+            current_app.logger.warning(
+                f"Shopify 429 (POST) za {url} – retry čez {delay:.1f}s "
+                f"(poskus {attempt+1}/{max_retries})"
+            )
+            with _shopify_rate_lock:
+                global _shopify_next_allowed_at
+                _shopify_next_allowed_at = max(
+                    _shopify_next_allowed_at, time.time() + delay
+                )
+            time.sleep(delay)
+            backoff = min(max(2.0, backoff * 2.0), 16.0)
+            continue
+
+        if 500 <= resp.status_code < 600:
+            current_app.logger.warning(
+                f"Shopify {resp.status_code} (POST) za {url} – retry čez {backoff:.1f}s"
+            )
+            time.sleep(backoff)
+            backoff = min(backoff * 2.0, 8.0)
+            continue
+
+        _bump_after_response(resp)
+        resp.raise_for_status()
+        return resp
+
+    # Po vseh poskusih
+    if last_exc:
+        raise last_exc
+    resp = requests.post(
+        url,
+        json=json_body,
+        headers=_get_shopify_headers(shop_domain),
+        timeout=timeout,
+    )
+    _bump_after_response(resp)
+    resp.raise_for_status()
+    return resp
+
+
 def clear_product_cache(store_key: str | None = None):
     """Počisti predpomnilnik izdelkov (globalno ali za določen store)."""
     global _product_metafields_cache, _cache_last_cleared
@@ -305,11 +389,14 @@ def get_bulk_product_details(product_ids, shop_domain: str | None = None):
             }}
             """
             try:
-                response = requests.post(_get_api_url(shop_domain=shop_domain), json={'query': query}, headers=_get_shopify_headers(shop_domain), timeout=15)
-                response.raise_for_status()
+                response = _shopify_post_with_retry(
+                    _get_api_url(shop_domain=shop_domain),
+                    json_body={'query': query},
+                    shop_domain=shop_domain,
+                )
                 data = response.json()
             except requests.exceptions.RequestException as e:
-                current_app.logger.error(f"Shopify batch fetch failed (size={len(batch)}): {e}")
+                current_app.logger.error(f"Shopify batch fetch failed after retries (size={len(batch)}): {e}")
                 continue
 
             if isinstance(data, dict) and 'errors' in data:
