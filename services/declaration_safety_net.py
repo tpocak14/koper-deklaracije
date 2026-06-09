@@ -2037,6 +2037,85 @@ def run_mandrill_verify_job() -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Sender watchdog (alert, če pošiljanje deklaracij obstane)
+# ---------------------------------------------------------------------------
+
+def run_sender_watchdog_job(
+    backlog_hours: int = 3,
+    threshold: int = 3,
+    window_days: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Watchdog, ki zazna, če Mandrill sender obstane (incident 2026-06-09).
+
+    Neodvisen signal: `delivered_at` postavi app-v2 sync-delivered pipeline,
+    ko MK preide v 'Zaključeno'. Če naročilo zahteva deklaracijo, je
+    dostavljeno, NI poslano, ni blokirano/returned, je znotraj send-okna in
+    nad floor datumom — in to traja > `backlog_hours` — potem sender verjetno
+    zaostaja (hung job / preskočeni zagoni zaradi max_instances). Ob doseženem
+    pragu (`threshold`) pošlje admin alert.
+
+    Naredi SAMO hitro DB poizvedbo (brez MK/Mandrill klicev), zato sam NE more
+    obviseti in zanesljivo opozori tudi takrat, ko safety-net job visi.
+    """
+    if window_days is None:
+        window_days = int(os.environ.get("SAFETY_NET_WINDOW_DAYS", "7") or 7)
+    floor_date = (os.environ.get("DECL_SEND_FLOOR_DATE", "") or "").strip() or None
+
+    db = get_db()
+    cursor = db.cursor()
+    stats: Dict[str, Any] = {"backlog": 0, "alerted": False, "examples": []}
+    try:
+        params: List[Any] = [backlog_hours, window_days]
+        floor_clause = ""
+        if floor_date:
+            floor_clause = " AND created_at >= %s::timestamptz"
+            params.append(floor_date)
+        cursor.execute(
+            f"""
+            SELECT order_number
+              FROM orders
+             WHERE requires_declaration = TRUE
+               AND mandrill_safety_message_id IS NULL
+               AND mk_return_detected_at IS NULL
+               AND pdf_generation_blocked_reason IS NULL
+               AND delivered_at IS NOT NULL
+               AND delivered_at < NOW() - (%s || ' hours')::interval
+               AND created_at > NOW() - (%s || ' days')::interval
+               {floor_clause}
+             ORDER BY delivered_at ASC
+             LIMIT 100
+            """,
+            tuple(params),
+        )
+        rows = cursor.fetchall()
+        stats["backlog"] = len(rows)
+        stats["examples"] = [
+            (dict(r) if not isinstance(r, dict) else r).get("order_number")
+            for r in rows[:15]
+        ]
+        if len(rows) >= threshold:
+            try:
+                from services.email_service import poslji_obvestilo_o_napaki
+                examples = ", ".join(str(e) for e in stats["examples"])
+                poslji_obvestilo_o_napaki(
+                    f"Mandrill sender morda obstal: {len(rows)} dostavljenih naročil "
+                    f"čaka na deklaracijo več kot {backlog_hours}h "
+                    f"(znotraj {window_days}-dnevnega okna).",
+                    "Naročila (do 15): " + examples + ". "
+                    "Verjeten vzrok: declaration_safety_net_job hang ali preskočeni "
+                    "zagoni (max_instances). Ukrep: restart Heroku web dyno + po "
+                    "potrebi ročni mk-cache-warmup, nato preveri pošiljanje.",
+                )
+                stats["alerted"] = True
+            except Exception as e:
+                logger.warning("Sender watchdog alert email failed: %s", e)
+    finally:
+        cursor.close()
+    logger.info("Sender watchdog: %s", {k: v for k, v in stats.items() if k != "examples"})
+    return stats
+
+
+# ---------------------------------------------------------------------------
 # Smart invalidation hooks
 # ---------------------------------------------------------------------------
 

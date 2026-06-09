@@ -423,6 +423,32 @@ def create_app():
             except Exception:
                 pass
 
+        # Sender watchdog (vsako uro): alert, če pošiljanje deklaracij obstane.
+        # Neodvisen DB-only check (brez MK/Mandrill klicev) — zazna, če so
+        # dostavljena naročila (delivered_at iz app-v2 pipeline-a) ostala brez
+        # poslane deklaracije >3h. Točno to bi ujelo incident 2026-06-09
+        # (hung job → preskočeni zagoni → dnevi brez pošiljanja, brez alarma).
+        def sender_watchdog_job():
+            with app.app_context():
+                try:
+                    from services.declaration_safety_net import run_sender_watchdog_job
+                    hours = int(os.environ.get('SENDER_WATCHDOG_BACKLOG_HOURS', '3') or 3)
+                    thr = int(os.environ.get('SENDER_WATCHDOG_THRESHOLD', '3') or 3)
+                    res = run_sender_watchdog_job(backlog_hours=hours, threshold=thr)
+                    if res.get('alerted'):
+                        app.logger.warning(
+                            "sender_watchdog_job ALERT: backlog=%d", res.get('backlog'))
+                    else:
+                        app.logger.info(
+                            "sender_watchdog_job ok: backlog=%d", res.get('backlog'))
+                except Exception as e:
+                    app.logger.error(f"sender_watchdog_job error: {e}", exc_info=True)
+
+        _disable_watchdog = _disable_all or (os.environ.get('DISABLE_SENDER_WATCHDOG', '') or '').strip().lower() in ('1', 'true', 'yes')
+        if not _disable_watchdog:
+            _wd_min = int(os.environ.get('SENDER_WATCHDOG_INTERVAL_MIN', '60') or 60)
+            scheduler.add_job(sender_watchdog_job, 'interval', minutes=_wd_min)
+
         scheduler.start()
 
         # Izpostavi globalno preko app.extensions, da lahko blueprints
