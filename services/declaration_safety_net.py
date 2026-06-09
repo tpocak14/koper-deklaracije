@@ -1469,8 +1469,26 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
         "uploaded_and_mandrill": 0,
         "returned": 0,
         "errors": 0,
+        "skipped_uncached": 0,
+        "timed_out_budget": False,
         "details": [],
     }
+
+    # ZAŠČITA PRED HANGOM (2026-06-09): naročila brez `mk_sales_order_id` sprožijo
+    # drag-scan po MetaKocki (mk_find_and_cache_sales_order_id), ki za naročila,
+    # ki še niso v MK, prečeše do ~1000 dokumentov × 2 načina = minute na naročilo.
+    # Ob nakopičenih uncached naročilih urni job nikoli ne konča → APScheduler
+    # (max_instances=1) preskoči vse nadaljnje zagone → deklaracije se NE pošiljajo.
+    # Zato:
+    #   - prioritiziramo naročila z že-cache-iranim mk_sales_order_id (cheap, ready),
+    #   - omejimo število dragih uncached iskanj na zagon (SAFETY_NET_MAX_UNCACHED),
+    #   - postavimo trdi časovni proračun na zagon (SAFETY_NET_TIME_BUDGET_S),
+    # da job VEDNO konča pred naslednjim urnim zagonom.
+    import time as _time
+    _budget_s = int(os.environ.get("SAFETY_NET_TIME_BUDGET_S", "240") or 240)
+    _max_uncached = int(os.environ.get("SAFETY_NET_MAX_UNCACHED", "5") or 5)
+    _started = _time.monotonic()
+    _uncached_used = 0
 
     try:
         params: List[Any] = [window_days]
@@ -1490,7 +1508,8 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
                AND (shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL)
                AND created_at > NOW() - (%s || ' days')::interval
                {floor_clause}
-             ORDER BY shopify_fulfilled_at DESC NULLS LAST, fulfilled_at DESC NULLS LAST, created_at DESC
+             ORDER BY (mk_sales_order_id IS NULL) ASC,
+                      shopify_fulfilled_at DESC NULLS LAST, fulfilled_at DESC NULLS LAST, created_at DESC
              LIMIT %s
             """,
             tuple(params)
@@ -1499,6 +1518,24 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
 
         for row in rows:
             order_data = dict(row) if not isinstance(row, dict) else row
+
+            # Trdi časovni proračun: ustavi se, da job zanesljivo konča.
+            if _time.monotonic() - _started > _budget_s:
+                stats["timed_out_budget"] = True
+                logger.warning(
+                    "Safety net: časovni proračun (%ss) presežen po %d naročilih — "
+                    "preostanek obdelamo v naslednjem zagonu.",
+                    _budget_s, stats["scanned"],
+                )
+                break
+
+            # Omeji draga uncached MK iskanja (drag-scan) na zagon.
+            if not order_data.get("mk_sales_order_id"):
+                if _uncached_used >= _max_uncached:
+                    stats["skipped_uncached"] += 1
+                    continue
+                _uncached_used += 1
+
             stats["scanned"] += 1
             try:
                 r = process_one(order_data, cursor)
