@@ -374,6 +374,55 @@ def create_app():
         if not _disable_safety:
             scheduler.add_job(safety_net_daily_digest_job, 'cron', hour=21, minute=30, timezone=lj)
 
+        # MK cache warmup (vsakih 30 min): bulk-napolni mk_sales_order_id +
+        # mk_last_status iz MK /search (najnovejši sales_orderji). KLJUČNO za
+        # safety-net: brez cache-iranega mk_sales_order_id mora safety-net za
+        # vsako naročilo narediti drag-scan (minute/naročilo) → urni job se
+        # zatakne in APScheduler (max_instances=1) preskoči vse nadaljnje
+        # zagone. Prej je warmup prožil ZUNANJI cron na /api/internal/
+        # mk-cache-warmup; ta je ob prehodu domen tiho odpovedal (~2026-06-03),
+        # zato so deklaracije prenehale iti ven. Zdaj teče interno (brez zunanje
+        # odvisnosti in brez 30s Heroku request limita).
+        def mk_cache_warmup_job():
+            with app.app_context():
+                try:
+                    from blueprints.internal_routes import mk_cache_warmup
+                    sec = (os.environ.get('CRON_SECRET') or '').strip()
+                    pages = int(os.environ.get('MK_WARMUP_PAGES', '6') or 6)
+                    with app.test_request_context(
+                        f"/api/internal/mk-cache-warmup?secret={sec}&pages={pages}&apply_returns=1"
+                    ):
+                        resp = mk_cache_warmup()
+                    body = resp[0] if isinstance(resp, tuple) else resp
+                    try:
+                        payload = body.get_json(silent=True) or {}
+                        st = payload.get('stats', {}) or {}
+                        app.logger.info(
+                            "mk_cache_warmup_job done: cached=%s already=%s returned=%s no_match=%s",
+                            st.get('orders_cached'), st.get('orders_already_cached'),
+                            st.get('returned_detected'), st.get('no_local_match'),
+                        )
+                    except Exception:
+                        app.logger.info("mk_cache_warmup_job done")
+                except Exception as e:
+                    app.logger.error(f"mk_cache_warmup_job error: {e}", exc_info=True)
+
+        _disable_warmup = _disable_all or (os.environ.get('DISABLE_MK_WARMUP_JOB', '') or '').strip().lower() in ('1', 'true', 'yes')
+        if not _disable_warmup:
+            _warm_min = int(os.environ.get('MK_WARMUP_INTERVAL_MIN', '30') or 30)
+            scheduler.add_job(mk_cache_warmup_job, 'interval', minutes=_warm_min)
+            # Enkratni zagon kmalu po startu (ne čakaj polnega intervala), da je
+            # cache svež takoj po deployu/restartu.
+            try:
+                from datetime import datetime as _dtw, timedelta as _tdw
+                scheduler.add_job(
+                    mk_cache_warmup_job, 'date',
+                    run_date=_dtw.now() + _tdw(seconds=90),
+                    id='mk_warmup_initial', replace_existing=True,
+                )
+            except Exception:
+                pass
+
         scheduler.start()
 
         # Izpostavi globalno preko app.extensions, da lahko blueprints
