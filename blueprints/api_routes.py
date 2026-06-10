@@ -3432,8 +3432,19 @@ def sync_fulfilled_status_endpoint():
         db.rollback()
         current_app.logger.info("Začenjam sinhronizacijo fulfilled statusa naročil...")
         
-        # Pridobi vsa unfulfilled naročila iz baze
-        cursor.execute("SELECT shopify_order_id, order_number, shopify_store_domain FROM orders WHERE fulfilled_at IS NULL")
+        # Pridobi unfulfilled naročila iz baze — omejeno na zadnjih 30 dni.
+        # Starejša naročila so pogosto izbrisana iz Shopify-ja (trajni 404) ali
+        # opuščena; brez omejitve je endpoint delal 1000+ Shopify klicev na klik.
+        cursor.execute(
+            """
+            SELECT shopify_order_id, order_number, shopify_store_domain
+            FROM orders
+            WHERE fulfilled_at IS NULL
+              AND shopify_order_id IS NOT NULL
+              AND created_at > NOW() - INTERVAL '30 days'
+            ORDER BY created_at DESC
+            """
+        )
         unfulfilled_orders = cursor.fetchall()
         
         if not unfulfilled_orders:
