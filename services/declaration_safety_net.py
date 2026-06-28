@@ -732,6 +732,12 @@ def validate_declaration_send_allowed(
     order_data: Dict[str, Any], cursor, *, check_pdf_batch: bool = True
 ) -> Optional[str]:
     """Če pošiljanje ni dovoljeno, vrne human-readable razlog (sicer None)."""
+    # Trd guard: preklicano naročilo (Shopify orders/cancelled) se NIKOLI ne pošlje.
+    if order_data.get("cancelled_at"):
+        return (
+            "Naročilo je PREKLICANO (cancelled_at je nastavljen) — "
+            "deklaracija se ne pošlje. Preveri stanje v MetaKocki."
+        )
     if check_pdf_batch:
         wait, msg = should_wait_for_2100_pdf_batch(order_data)
         if wait:
@@ -1505,6 +1511,7 @@ def run_safety_net_job(window_days: int = 7, batch_limit: int = 200) -> Dict[str
                AND pdf_generation_blocked_reason IS NULL
                AND mandrill_safety_message_id IS NULL
                AND mk_return_detected_at IS NULL
+               AND cancelled_at IS NULL
                AND (shopify_fulfilled_at IS NOT NULL OR fulfilled_at IS NOT NULL)
                AND created_at > NOW() - (%s || ' days')::interval
                {floor_clause}

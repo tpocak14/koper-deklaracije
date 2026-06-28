@@ -204,6 +204,104 @@ def _apply_shopify_revert_order(c, payload, *, shop_domain, event_type):
     return reverted
 
 
+def _apply_shopify_cancellation_flag(c, payload, *, shop_domain):
+    """Idempotentno zabeleži preklic naročila (orders/cancelled).
+
+    Postavi `orders.cancelled_at` + `orders.cancel_reason` prek COALESCE (zapiše
+    le, če sta še NULL → prvi pisec zmaga, dual-receive z Vercelom je varen).
+    Vrne dict z informacijo, ali je bil preklic *na novo* postavljen (za sprožitev
+    MK propagacije in opozorila skladišču SAMO ob prvem zaznanem preklicu), ali
+    None, če naročilo ni najdeno.
+    """
+    if not isinstance(payload, dict):
+        return None
+    order_id = str(payload.get('id') or payload.get('order_id') or '')
+    if not order_id:
+        return None
+
+    # Shopify pošlje `cancelled_at` (ISO8601); če manjka, uporabi NOW().
+    cancelled_at_iso = payload.get('cancelled_at') or None
+    cancel_reason = payload.get('cancel_reason') or None
+
+    # CTE prebere prejšnji cancelled_at, da zaznamo *nov* preklic (old IS NULL →
+    # zdaj NOT NULL). UPDATE uporablja COALESCE (idempotentno).
+    c.execute(
+        """
+        WITH prev AS (
+            SELECT shopify_order_id, cancelled_at AS old_cancelled_at
+              FROM orders
+             WHERE shopify_order_id = %s
+               AND (shopify_store_domain = %s OR shopify_store_domain IS NULL)
+        )
+        UPDATE orders o
+           SET cancelled_at = COALESCE(o.cancelled_at, COALESCE(%s::timestamptz, NOW())),
+               cancel_reason = COALESCE(o.cancel_reason, %s)
+          FROM prev
+         WHERE o.shopify_order_id = prev.shopify_order_id
+           AND (o.shopify_store_domain = %s OR o.shopify_store_domain IS NULL)
+        RETURNING o.order_number, prev.old_cancelled_at, o.cancelled_at,
+                  o.fulfilled_at, o.delivered_at, o.critical_alert_sent_at,
+                  o.mk_sales_order_id
+        """,
+        (order_id, shop_domain, cancelled_at_iso, cancel_reason, shop_domain),
+    )
+    row = c.fetchone()
+    if not row:
+        return None
+
+    def _g(key, idx):
+        return row[key] if isinstance(row, dict) else row[idx]
+
+    old_cancelled_at = _g('old_cancelled_at', 1)
+    new_cancelled_at = _g('cancelled_at', 2)
+    return {
+        'order_number': _g('order_number', 0),
+        'newly_set': old_cancelled_at is None and new_cancelled_at is not None,
+        'cancelled_at': new_cancelled_at,
+        'fulfilled_at': _g('fulfilled_at', 3),
+        'delivered_at': _g('delivered_at', 4),
+        'critical_alert_sent_at': _g('critical_alert_sent_at', 5),
+        'mk_sales_order_id': _g('mk_sales_order_id', 6),
+    }
+
+
+def _maybe_alert_warehouse_cancelled(c, cancel_info):
+    """Layer D: takojšnje opozorilo skladišču, če je preklicano naročilo še
+    'pickable' (ni fulfilled in ni dostavljeno) → da ga ne odpremijo zastonj.
+
+    Dedup prek `orders.critical_alert_sent_at` (kot safety net). Non-blocking.
+    """
+    if not cancel_info:
+        return
+    order_number = cancel_info.get('order_number')
+    if not order_number:
+        return
+    # Že fulfilled / dostavljeno → ni več pickable, opozorilo ni smiselno.
+    if cancel_info.get('fulfilled_at') or cancel_info.get('delivered_at'):
+        current_app.logger.info(
+            f"webhook/orders/cancelled: {order_number} že fulfilled/dostavljeno — alert preskočen."
+        )
+        return
+    # Že poslano (dedup) → preskoči.
+    if cancel_info.get('critical_alert_sent_at'):
+        return
+    try:
+        from services.email_service import poslji_preklic_alert
+        sent = poslji_preklic_alert(cancel_info)
+        if sent:
+            c.execute(
+                "UPDATE orders SET critical_alert_sent_at = NOW() WHERE order_number = %s",
+                (order_number,),
+            )
+            current_app.logger.info(
+                f"webhook/orders/cancelled: poslano opozorilo skladišču za {order_number}"
+            )
+    except Exception as e:
+        current_app.logger.warning(
+            f"webhook/orders/cancelled: opozorilo za {order_number} ni uspelo: {e}"
+        )
+
+
 def _apply_shopify_refund(c, payload, *, shop_domain):
     """Partial revert for refunds/create webhook.
 
@@ -913,6 +1011,59 @@ def _process_shopify_webhook_in_background(app, topic, data_bytes, shop_domain: 
                 except Exception as e:
                     current_app.logger.error(f"webhook/orders/cancelled revert error: {e}")
                     traceback.print_exc()
+
+                # Layer A: idempotentno zabeleži preklic (cancelled_at/cancel_reason).
+                cancel_info = None
+                try:
+                    cancel_info = _apply_shopify_cancellation_flag(
+                        cursor, payload, shop_domain=shop_domain,
+                    )
+                    # Commitamo takoj, da preklic obstane tudi, če kasnejši
+                    # (MK/alert) koraki kako padejo.
+                    db.commit()
+                    if cancel_info:
+                        current_app.logger.info(
+                            f"webhook/orders/cancelled: cancelled_at set za {cancel_info.get('order_number')} "
+                            f"(newly_set={cancel_info.get('newly_set')})"
+                        )
+                except Exception as e:
+                    current_app.logger.error(f"webhook/orders/cancelled flag error: {e}")
+                    traceback.print_exc()
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+
+                # Sledeče sprožimo SAMO ob *prvem* zaznanem preklicu (dedup).
+                if cancel_info and cancel_info.get('newly_set'):
+                    order_number = cancel_info.get('order_number')
+
+                    # Layer B: MK STORNO statusa (GATED, best-effort, NE blokira webhooka).
+                    try:
+                        from services.mk_service import mk_cancel_sales_order_if_unshipped
+                        mk_res = mk_cancel_sales_order_if_unshipped(order_number)
+                        current_app.logger.info(
+                            f"webhook/orders/cancelled MK storno {order_number}: {mk_res}"
+                        )
+                    except Exception as e:
+                        current_app.logger.error(
+                            f"webhook/orders/cancelled MK storno napaka {order_number}: {e}"
+                        )
+                        traceback.print_exc()
+
+                    # Layer D: opozorilo skladišču, če je naročilo še pickable.
+                    try:
+                        _maybe_alert_warehouse_cancelled(cursor, cancel_info)
+                        db.commit()
+                    except Exception as e:
+                        current_app.logger.error(
+                            f"webhook/orders/cancelled alert napaka {order_number}: {e}"
+                        )
+                        traceback.print_exc()
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
 
             elif topic == 'refunds/create':
                 try:

@@ -2151,6 +2151,104 @@ def mk_find_sales_order_by_title(title: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def mk_change_document_status(
+    *,
+    status_code: str,
+    doc_type: str = 'sales_order',
+    mk_id: Optional[str] = None,
+    buyer_order: Optional[str] = None,
+    timeout: Optional[int] = None,
+) -> Dict[str, Any]:
+    """POST na MK `change_document_status` (programski preklic naročila).
+
+    MK identificira dokument po `mk_id` (prednostno) ALI `buyer_order` (št. naročila).
+    `status_code` MORA biti točen "description" preklicanega statusa iz MK registra
+    (nastavljen prek env MK_CANCEL_STATUS_CODE — tukaj ga NE ugibamo/hardcodamo).
+
+    Returns dict odgovora MK (vrže izjemo le ob HTTP/MK napaki prek retry helperja).
+    """
+    base = _mk_base()
+    company_id = _mk_company_id()
+    secret = _mk_secret_key()
+    if not base or not company_id or not secret:
+        raise RuntimeError('MK config missing (base/company_id/secret) for change_document_status')
+    if not (mk_id or buyer_order):
+        raise RuntimeError('mk_change_document_status: manjka mk_id ali buyer_order')
+
+    url = f"{base}/change_document_status"
+    payload: Dict[str, Any] = {
+        'company_id': str(company_id),
+        'secret': str(secret),
+        'secret_key': str(secret),
+        'doc_type': doc_type,
+        'status_code': str(status_code),
+    }
+    if mk_id:
+        payload['mk_id'] = str(mk_id)
+    if buyer_order:
+        payload['buyer_order'] = str(buyer_order)
+
+    # WRITE op — zmeren retry (kot drugi MK write klici).
+    return _mk_post_json_with_retry(url, payload, max_attempts=3, min_backoff=1.0, max_backoff=8.0, timeout=timeout)
+
+
+def mk_cancel_sales_order_if_unshipped(order_number: str) -> Dict[str, Any]:
+    """Best-effort programski preklic MK sales_order, ČE še ni odpremljen.
+
+    Flow (vse non-blocking, vrne diagnostični dict; klicalec dodatno ovije v try):
+      1. GATING: če MK_CANCEL_STATUS_CODE ni nastavljen → preskoči (no-op).
+      2. Najdi MK sales_order po številki naročila in preberi trenuten status.
+      3. Če je status shipped/completed/returned → preskoči (prepozno / ni smiselno).
+      4. Sicer nastavi status na preklic (change_document_status).
+    """
+    status_code = (os.environ.get('MK_CANCEL_STATUS_CODE') or '').strip()
+    if not status_code:
+        try:
+            current_app.logger.info("MK cancel skipped (MK_CANCEL_STATUS_CODE not set)")
+        except Exception:
+            pass
+        return {'skipped': True, 'reason': 'MK_CANCEL_STATUS_CODE not set'}
+
+    if not order_number:
+        return {'skipped': True, 'reason': 'no order_number'}
+
+    clean = str(order_number).lstrip('#').strip()
+    try:
+        doc = mk_find_sales_order_by_title(clean) or mk_find_sales_order_by_title(str(order_number))
+    except Exception as e:
+        return {'skipped': True, 'reason': f'MK lookup failed: {e}'}
+    if not doc:
+        return {'skipped': True, 'reason': 'MK sales_order not found'}
+
+    from services.declaration_safety_net import classify_mk_status
+    category = classify_mk_status(doc.get('status_desc'), doc.get('status_code'))
+    if category in ('shipped', 'completed', 'returned'):
+        return {
+            'skipped': True,
+            'reason': f'MK status={category} (že odpremljeno/zaključeno/vračilo) — preklic ne izvedem',
+            'mk_status_code': doc.get('status_code'),
+            'mk_status_desc': doc.get('status_desc'),
+        }
+
+    mk_id = doc.get('mk_id') or doc.get('id') or doc.get('doc_id')
+    try:
+        resp = mk_change_document_status(
+            status_code=status_code,
+            doc_type='sales_order',
+            mk_id=str(mk_id) if mk_id else None,
+            buyer_order=clean,
+        )
+        return {
+            'ok': True,
+            'cancelled': True,
+            'mk_id': str(mk_id) if mk_id else None,
+            'prev_status': category,
+            'response': resp,
+        }
+    except Exception as e:
+        return {'ok': False, 'reason': f'change_document_status failed: {e}'}
+
+
 def mk_print_bill_pdf(doc_type: str, mk_id: str, timeout: int = 45, *, locale: str | None = None, country: str | None = None) -> Optional[bytes]:
     """Request official PDF from MetaKocka using /report with dump params.
 
@@ -3692,6 +3790,220 @@ def mk_bill_from_sales_order(mk_sales_order_id: str) -> Tuple[Optional[str], Opt
             if dt == pref:
                 return mid, dt
     return candidates[0]
+
+
+def _mk_auto_credit_note_enabled() -> bool:
+    """Master stikalo za avtomatsko izdajo dobropisa ob preklicu (privzeto OFF).
+
+    Vklop prek MK_AUTO_CREDIT_NOTE ∈ {1,true,yes,on} (case-insensitive). Privzeto
+    izklopljeno, da lahko status→Storno + alert plasti varno gredo v produkcijo
+    pred polno aktivacijo dobropisov.
+    """
+    val = (os.environ.get('MK_AUTO_CREDIT_NOTE') or '').strip().lower()
+    return val in ('1', 'true', 'yes', 'on')
+
+
+def _mk_today_doc_date() -> str:
+    """Datum za MK put_document (format 'YYYY-MM-DD+TZ', kot v MK primerih).
+
+    MK primeri uporabljajo npr. '2021-11-05+02:00'. Lokalni čas Slovenije je
+    privzeto +01:00/+02:00; uporabimo lokalni tz offset, da se ujema z UI.
+    """
+    try:
+        now = datetime.now().astimezone()
+        return now.strftime('%Y-%m-%d%z')[:-2] + ':' + now.strftime('%z')[-2:]
+    except Exception:
+        # Varni fallback — samo datum (MK ga sprejme).
+        return datetime.now().strftime('%Y-%m-%d')
+
+
+def _mk_sales_order_has_credit_note(sales_order_doc: Dict[str, Any]) -> bool:
+    """Ali ima prodajni nalog v doc_link_list že povezan dobropis?"""
+    try:
+        links = sales_order_doc.get('doc_link_list') or []
+        if not isinstance(links, list):
+            return False
+        for ln in links:
+            if isinstance(ln, dict) and 'credit' in str(ln.get('doc_type') or '').lower():
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _mk_bill_already_credited(bill_mk_id: str, bill_doc_type: str) -> bool:
+    """Ali račun že ima dobropis? Preverimo `sum_creditnote` (show_last_payment_date)
+    in `doc_link_list` na samem računu.
+    """
+    try:
+        bill = mk_get_document(bill_doc_type, str(bill_mk_id), {'show_last_payment_date': 'true'})
+    except Exception:
+        bill = None
+    if not isinstance(bill, dict):
+        return False
+    try:
+        scn = str(bill.get('sum_creditnote') or '').strip()
+        if scn:
+            # nonzero (toleriramo decimalno vejico/piko)
+            num = float(scn.replace(',', '.'))
+            if abs(num) > 0:
+                return True
+    except Exception:
+        pass
+    try:
+        links = bill.get('doc_link_list') or []
+        if isinstance(links, list):
+            for ln in links:
+                if isinstance(ln, dict) and 'credit' in str(ln.get('doc_type') or '').lower():
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _mk_copy_invoice_product_list(bill_doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Prekopiraj postavke originalnega računa VERBATIM za dobropis (goods).
+
+    Ohranimo `code`, `amount`, `price` (ali `price_with_tax`), `discount`, `tax`,
+    `name`/`name_desc` — vključno z vrstico COD (Plačilo po povzetju). Tax kod NE
+    preračunavamo (odvisen je od države dostave — kopiramo, kot ga je MK zapisal
+    na računu).
+    """
+    out: List[Dict[str, Any]] = []
+    items = bill_doc.get('product_list') or []
+    if not isinstance(items, list):
+        return out
+    keep_keys = ('code', 'amount', 'price', 'price_with_tax', 'discount', 'tax', 'name', 'name_desc', 'doc_desc')
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        line: Dict[str, Any] = {}
+        for k in keep_keys:
+            v = it.get(k)
+            if v is not None and str(v) != '':
+                line[k] = v
+        # Vrstica je smiselna le, če ima vsaj ceno in tax.
+        if 'price' in line or 'price_with_tax' in line:
+            out.append(line)
+    return out
+
+
+def mk_create_goods_credit_note_for_order(order_number: str) -> Dict[str, Any]:
+    """Ob preklicu naročila ustvari finančni/blagovni DOBROPIS na povezanem računu.
+
+    Privzeta pot (uporabnikova dejanska praksa na tem MK računu):
+      credit_note_type="goods" — postavke dobropisa so VERBATIM kopija postavk
+      originalnega računa (vključno z COD vrstico in per-vrstico tax kodi, ki so
+      odvisni od države dostave). MK na podlagi teh postavk sam izračuna sume in
+      vrne zalogo.
+
+    Flow (non-blocking; vrne diagnostični dict; klicalec dodatno ovije v try):
+      1. MASTER GATE: MK_AUTO_CREDIT_NOTE mora biti vklopljen (privzeto OFF).
+      2. Najdi MK sales_order po številki naročila.
+      3. IDEMPOTENTNOST: če nalog/račun že ima povezan dobropis → preskoči.
+      4. Razreši povezan račun (mk_bill_from_sales_order) in preberi njegov
+         count_code + product_list prek get_document.
+      5. Sestavi dobropis (kopija postavk) in ga ustvari prek put_document.
+    """
+    if not _mk_auto_credit_note_enabled():
+        try:
+            current_app.logger.info("MK credit note skipped (MK_AUTO_CREDIT_NOTE not enabled)")
+        except Exception:
+            pass
+        return {'skipped': True, 'reason': 'MK_AUTO_CREDIT_NOTE not enabled'}
+
+    if not order_number:
+        return {'skipped': True, 'reason': 'no order_number'}
+
+    credit_note_type = (os.environ.get('MK_CREDIT_NOTE_TYPE') or 'goods').strip().lower() or 'goods'
+    clean = str(order_number).lstrip('#').strip()
+
+    # 1) Prodajni nalog
+    try:
+        so = mk_find_sales_order_by_title(clean) or mk_find_sales_order_by_title(str(order_number))
+    except Exception as e:
+        return {'skipped': True, 'reason': f'MK sales_order lookup failed: {e}'}
+    if not so:
+        return {'skipped': True, 'reason': 'MK sales_order not found'}
+
+    so_mk_id = so.get('mk_id') or so.get('id') or so.get('doc_id')
+
+    # 2) Idempotentnost — nalog že povezan z dobropisom?
+    if _mk_sales_order_has_credit_note(so):
+        return {'skipped': True, 'reason': 'credit note already linked on sales_order'}
+
+    # 3) Razreši povezan račun
+    if not so_mk_id:
+        return {'skipped': True, 'reason': 'sales_order has no mk_id'}
+    try:
+        bill_mk_id, bill_doc_type = mk_bill_from_sales_order(str(so_mk_id))
+    except Exception as e:
+        return {'skipped': True, 'reason': f'bill resolution failed: {e}'}
+    if not bill_mk_id or not bill_doc_type:
+        return {'skipped': True, 'reason': 'no linked invoice (sales_bill) found for order'}
+
+    # 4) Idempotentnost — račun že kreditiran?
+    if _mk_bill_already_credited(str(bill_mk_id), str(bill_doc_type)):
+        return {
+            'skipped': True,
+            'reason': 'invoice already has a credit note (sum_creditnote/doc_link_list)',
+            'bill_mk_id': str(bill_mk_id),
+        }
+
+    # 5) Preberi original račun (count_code + product_list)
+    try:
+        bill_doc = mk_get_document(str(bill_doc_type), str(bill_mk_id))
+    except Exception as e:
+        return {'skipped': True, 'reason': f'invoice get_document failed: {e}'}
+    if not isinstance(bill_doc, dict):
+        return {'skipped': True, 'reason': 'invoice get_document returned no document'}
+
+    invoice_count_code = (bill_doc.get('count_code') or '').strip()
+    if not invoice_count_code:
+        return {'skipped': True, 'reason': 'invoice has no count_code (cannot link credit note)'}
+
+    product_list = _mk_copy_invoice_product_list(bill_doc)
+    if not product_list:
+        return {'skipped': True, 'reason': 'invoice product_list empty (nothing to credit)'}
+
+    # 6) Sestavi in ustvari dobropis prek put_document
+    base = _mk_base()
+    doc_date = _mk_today_doc_date()
+    payload: Dict[str, Any] = {
+        'doc_type': 'sales_bill_credit_note',
+        'credit_note_type': credit_note_type,
+        'credit_note_bill': invoice_count_code,
+        'doc_date': doc_date,
+        'service_to_date': doc_date,
+        'duo_payment': doc_date,
+        'product_list': product_list,
+    }
+    url = f"{base}/put_document"
+    try:
+        resp = _mk_post_json_with_retry(url, payload, max_attempts=3, min_backoff=1.0, max_backoff=8.0)
+        cn_mk_id = None
+        if isinstance(resp, dict):
+            cn_mk_id = resp.get('mk_id') or resp.get('doc_id') or resp.get('id')
+        try:
+            current_app.logger.info(
+                f"MK credit note created order={clean} bill={invoice_count_code} "
+                f"type={credit_note_type} lines={len(product_list)} cn_mk_id={cn_mk_id}"
+            )
+        except Exception:
+            pass
+        return {
+            'ok': True,
+            'created': True,
+            'credit_note_type': credit_note_type,
+            'bill_mk_id': str(bill_mk_id),
+            'bill_doc_type': str(bill_doc_type),
+            'invoice_count_code': invoice_count_code,
+            'lines': len(product_list),
+            'credit_note_mk_id': str(cn_mk_id) if cn_mk_id else None,
+            'response': resp,
+        }
+    except Exception as e:
+        return {'ok': False, 'reason': f'put_document credit_note failed: {e}'}
 
 
 def mk_link_orders_missing_bills(days: int = 21, limit: int = 25, per_order_budget_s: float = 15.0) -> int:

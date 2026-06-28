@@ -1369,6 +1369,42 @@ def poslji_safety_net_instant_alert(order_data: dict, analysis: dict) -> bool:
     return _safety_net_send_html(subject, html_body)
 
 
+def poslji_preklic_alert(cancel_info: dict) -> bool:
+    """Takojšnje opozorilo skladišču: naročilo je bilo PREKLICANO v Shopify-ju,
+    a je še 'pickable' (ni fulfilled/dostavljeno) → NE ODPREMLJAJ ga zastonj.
+
+    Pošlje se enkrat (dedup prek orders.critical_alert_sent_at v klicalcu).
+    """
+    import html as html_lib
+    order_number = cancel_info.get('order_number') or '?'
+    cancelled_at = cancel_info.get('cancelled_at')
+    cancelled_str = str(cancelled_at)[:19] if cancelled_at else '?'
+
+    admin_base = (current_app.config.get('ADMIN_NEXT_BASE_URL')
+                  or os.environ.get('ADMIN_NEXT_BASE_URL')
+                  or 'https://deklaracije.eu').rstrip('/')
+    order_url = f"{admin_base}/narocila/{html_lib.escape(str(order_number).lstrip('#'))}"
+
+    html_body = f"""
+    <div style="font-family:-apple-system,Segoe UI,Arial,sans-serif;max-width:640px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:2px solid #dc2626">
+      <div style="background:#dc2626;color:#fff;padding:14px 20px;font-size:16px;font-weight:700">
+        🛑 PREKLICANO — NE ODPREMLJAJ
+      </div>
+      <div style="padding:18px 20px;font-size:14px;color:#374151;line-height:1.6">
+        <p><strong>Naročilo:</strong> <a href="{order_url}" style="color:#dc2626">{html_lib.escape(str(order_number))}</a></p>
+        <p><strong>Preklicano:</strong> {html_lib.escape(cancelled_str)}</p>
+        <div style="margin-top:16px;padding:12px;background:#fee2e2;border-radius:8px;font-size:14px;font-weight:600;color:#991b1b">
+          ⚠️ To naročilo je bilo preklicano v Shopify-ju in še ni bilo odpremljeno.
+          NE pripravljaj/odpremljaj paketa in NE pošiljaj deklaracije.
+          Preveri stanje v MetaKocki.
+        </div>
+      </div>
+    </div>
+    """
+    subject = f"🛑 [PREKLIC] Ne odpremljaj: {order_number}"
+    return _safety_net_send_html(subject, html_body)
+
+
 def poslji_safety_net_daily_digest(stats: dict, blocked_orders: list, recent_safety_sends: list) -> bool:
     """Dnevni povzetek safety net dejavnosti (ob 21:30, po dnevnem batchu)."""
     import html as html_lib
