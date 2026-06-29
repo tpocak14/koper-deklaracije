@@ -515,7 +515,37 @@ def _should_remove_mf_tag(tag: str, has_dv: bool, has_pf: bool) -> bool:
     return False
 
 
+def _mf_tag_sync_disabled_for(shop_domain: str | None) -> bool:
+    """Ali je avtomatska sinhronizacija mf_dv-/mf_pf- tagov izklopljena za to trgovino?
+
+    Krmiljeno prek env MF_TAG_SYNC_DISABLED_DOMAINS (z vejico ločen seznam
+    myshopify domen). Primerjava je case-insensitive in tolerantna na manjkajočo
+    '.myshopify.com' pripono (npr. 'amour-parfums-2' == 'amour-parfums-2.myshopify.com').
+    """
+    raw = (os.environ.get('MF_TAG_SYNC_DISABLED_DOMAINS') or '').strip()
+    if not raw or not shop_domain:
+        return False
+
+    def _norm(d: str) -> str:
+        d = (d or '').strip().lower()
+        if d and not d.endswith('.myshopify.com'):
+            d = f'{d}.myshopify.com'
+        return d
+
+    target = _norm(shop_domain)
+    disabled = {_norm(x) for x in raw.split(',') if x.strip()}
+    return target in disabled
+
+
 def sync_product_tags_from_metafields(shop_domain: str, product_id: str) -> dict:
+    if _mf_tag_sync_disabled_for(shop_domain):
+        try:
+            current_app.logger.info(
+                f"mf tag-sync DISABLED for {shop_domain} — skip product {product_id}"
+            )
+        except Exception:
+            pass
+        return {"changed": False, "skipped": True, "reason": "mf_tag_sync_disabled"}
     query = """
     query ($id: ID!) {
       product(id: $id) {
@@ -581,6 +611,10 @@ def sync_product_tags_from_metafields(shop_domain: str, product_id: str) -> dict
 
 
 def sync_all_product_tags_from_metafields(shop_domain: str, sleep_seconds: float = 0.0) -> dict:
+    if _mf_tag_sync_disabled_for(shop_domain):
+        current_app.logger.info(f"mf tag-sync DISABLED for {shop_domain} — bulk skip")
+        return {"ok": True, "skipped": True, "reason": "mf_tag_sync_disabled",
+                "changed": 0, "unchanged": 0, "errors": 0}
     products = get_all_products_for_name_sync(shop_domain=shop_domain)
     if products is None:
         return {"ok": False, "error": "Failed to fetch products"}
