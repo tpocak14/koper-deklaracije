@@ -1141,6 +1141,43 @@ def migrate_025_mk_return_detection():
             pass
 
 
+@internal_bp.route('/migrate/029-outbound-email-log', methods=['POST', 'GET'])
+def migrate_029_outbound_email_log():
+    """Ad-hoc migration runner za migracijo 029 (outbound_email_log audit tabela).
+
+    Ustvari skupno tabelo `outbound_email_log` (deljena z app-v2) idempotentno
+    in vrne, ali tabela obstaja. Varno klicati večkrat (CREATE ... IF NOT EXISTS).
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    db = get_db()
+    c = db.cursor()
+    try:
+        from services.outbound_email_log import ensure_outbound_email_log_table
+        ensure_outbound_email_log_table(db)
+        c.execute("SELECT to_regclass('public.outbound_email_log') AS t")
+        row = c.fetchone()
+        exists = bool(row and (row['t'] if isinstance(row, dict) else row[0]))
+        return jsonify({
+            'ok': True,
+            'migration': '029_outbound_email_log',
+            'applied': True,
+            'table_exists': exists,
+        })
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        current_app.logger.error(f"/api/internal/migrate/029 error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            c.close()
+        except Exception:
+            pass
+
+
 @internal_bp.route('/settings/status', methods=['GET'])
 def settings_status():
     """Read-only pregled konfiguracije za /nastavitve (app-v2).

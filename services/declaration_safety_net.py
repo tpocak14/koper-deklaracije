@@ -608,6 +608,50 @@ _MANDRILL_FAILURE_STATUSES = frozenset(
     {"rejected", "invalid", "bounced", "soft-bounced", "spam"}
 )
 
+# From polja, ki jih uporablja mandrill_service.send_template kot privzete —
+# beležimo jih v outbound_email_log za popoln audit.
+_DECL_FROM_EMAIL = "orders@amourparfums.com"
+_DECL_FROM_NAME = "AMOUR Parfums"
+
+
+def _log_declaration_email(
+    order_number: Optional[str],
+    *,
+    status: str,
+    recipient_to: Optional[str] = None,
+    recipient_bcc: Optional[str] = None,
+    mandrill_message_id: Optional[str] = None,
+    error: Optional[str] = None,
+    template_name: Optional[str] = None,
+    merge_vars: Optional[Any] = None,
+    attachment_name: Optional[str] = None,
+    attachment_content: Optional[bytes] = None,
+) -> None:
+    """Non-fatal zapis deklaracijskega maila (Mandrill pot) v outbound_email_log."""
+    try:
+        from services.outbound_email_log import log_outbound_email
+
+        log_outbound_email(
+            email_type="declaration",
+            channel="flask",
+            recipient_to=recipient_to,
+            recipient_bcc=recipient_bcc,
+            from_email=_DECL_FROM_EMAIL,
+            from_name=_DECL_FROM_NAME,
+            mandrill_message_id=mandrill_message_id,
+            status=status,
+            error=error,
+            order_number=order_number,
+            template_name=template_name,
+            merge_vars=merge_vars,
+            attachment_name=attachment_name,
+            attachment_mime="application/pdf" if attachment_content else None,
+            attachment_content=attachment_content,
+        )
+    except Exception:
+        # Beleženje ne sme nikoli prekiniti pošiljanja.
+        pass
+
 
 def smtp_declaration_fallback_enabled() -> bool:
     """SMTP rezerva je privzeto izklopljena; vklopi z SMTP_DECLARATION_FALLBACK=1."""
@@ -843,16 +887,44 @@ def send_declaration_via_mandrill(
             logger.warning("Mandrill log cross-check failed for %s: %s", order_number, e)
 
     merge_vars = build_mandrill_merge_vars(order_data, declaration_items)
+    attachment_name = f"Deklaracija_{order_number}.pdf"
+
+    # Admin BCC: glavni vir resnice je DB toggle (app_settings.admin_bcc_enabled
+    # + admin_email), z env fallback-om. Enako kot app-v2.
+    from services.outbound_email_log import resolve_admin_bcc
+
+    bcc_admin = resolve_admin_bcc()
+    recipient_email = order_data.get("customer_email") or order_data.get("email")
+
     if not pdf_path or not os.path.isfile(pdf_path):
         result["reason"] = "pdf_missing"
+        _log_declaration_email(
+            order_number,
+            status="error",
+            error="pdf_missing",
+            recipient_to=recipient_email,
+            recipient_bcc=bcc_admin,
+            template_name=target_template_name,
+            merge_vars=merge_vars,
+            attachment_name=attachment_name,
+        )
         return result
 
     with open(pdf_path, "rb") as f:
         pdf_bytes = f.read()
 
-    recipient_email = order_data.get("customer_email") or order_data.get("email")
     if not recipient_email:
         result["reason"] = "missing_customer_email"
+        _log_declaration_email(
+            order_number,
+            status="error",
+            error="missing_customer_email",
+            recipient_bcc=bcc_admin,
+            template_name=target_template_name,
+            merge_vars=merge_vars,
+            attachment_name=attachment_name,
+            attachment_content=pdf_bytes,
+        )
         return result
 
     recipient_name = (
@@ -864,9 +936,10 @@ def send_declaration_via_mandrill(
         or recipient_email
     )
 
-    bcc_admin = (os.environ.get("ADMIN_BCC_DECLARATION_EMAIL", "") or "").strip() or None
     order_number_clean = str(order_number or "").lstrip("#").strip()
 
+    mandrill_resp = None
+    mandrill_error: Optional[str] = None
     try:
         mandrill_resp = mandrill_service.send_template(
             template_name=target_template_name,
@@ -874,7 +947,7 @@ def send_declaration_via_mandrill(
             global_merge_vars=merge_vars,
             attachments=[
                 {
-                    "filename": f"Deklaracija_{order_number}.pdf",
+                    "filename": attachment_name,
                     "data": pdf_bytes,
                     "type": "application/pdf",
                 }
@@ -897,7 +970,21 @@ def send_declaration_via_mandrill(
             order_number,
             target_template_name,
         )
-        result["reason"] = f"mandrill_send_failed: {e}"
+        mandrill_error = str(e)
+
+    if mandrill_error is not None:
+        result["reason"] = f"mandrill_send_failed: {mandrill_error}"
+        _log_declaration_email(
+            order_number,
+            status="error",
+            error=mandrill_error,
+            recipient_to=recipient_email,
+            recipient_bcc=bcc_admin,
+            template_name=target_template_name,
+            merge_vars=merge_vars,
+            attachment_name=attachment_name,
+            attachment_content=pdf_bytes,
+        )
         return result
 
     msg = (mandrill_resp or [{}])[0]
@@ -916,6 +1003,20 @@ def send_declaration_via_mandrill(
         WHERE order_number = %s
         """,
         (message_id, status, recipient_email, order_number),
+    )
+
+    # AUDIT: zabeleži poslano deklaracijo (vsebina prek template_name + merge_vars,
+    # priloga kot bytea). Non-fatal — nikoli ne prekine send-a.
+    _log_declaration_email(
+        order_number,
+        status=status or "sent",
+        recipient_to=recipient_email,
+        recipient_bcc=bcc_admin,
+        mandrill_message_id=message_id,
+        template_name=target_template_name,
+        merge_vars=merge_vars,
+        attachment_name=attachment_name,
+        attachment_content=pdf_bytes,
     )
 
     result["success"] = True

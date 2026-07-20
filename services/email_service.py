@@ -14,6 +14,26 @@ from io import StringIO
 import requests
 import os
 
+
+def _log_email_send_error(log_ctx, exc):
+    """Non-fatal zapis neuspelega SMTP send-a v outbound_email_log.
+
+    log_ctx je lahko None, če je napaka nastopila pred sestavo konteksta
+    (npr. pri branju predloge) — v tem primeru preskočimo (ni bil dejanski
+    poskus pošiljanja e-pošte s prilogo).
+    """
+    if not log_ctx:
+        return
+    try:
+        from services.outbound_email_log import log_outbound_email
+        log_outbound_email(
+            channel='flask', status='error', error=str(exc),
+            attachment_mime='application/pdf', **log_ctx
+        )
+    except Exception:
+        pass
+
+
 def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path, declaration_items, status_url, shop_url, country_code, line_items, skip_test_redirect=False, allow_smtp_fallback=False):
     """Pošlje email s PDF prilogo (legacy SMTP — rezerva, ne primarna pot)."""
     try:
@@ -103,7 +123,10 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
         # Admin BCC (SMTP pot): enako kot Mandrill safety net — kupec ne vidi
         # naslova v glavah. Ne dodajamo pri redirect/test-only/both (tam admin
         # že dobi kopijo).
-        bcc_admin = os.environ.get("ADMIN_BCC_DECLARATION_EMAIL", "").strip() or None
+        # Admin BCC: glavni vir resnice je DB toggle (app_settings.admin_bcc_enabled
+        # + admin_email), z env fallback-om. Enako kot app-v2 in Mandrill pot.
+        from services.outbound_email_log import resolve_admin_bcc
+        bcc_admin = resolve_admin_bcc()
         use_admin_bcc = (
             bcc_admin
             and not redirect_to
@@ -240,7 +263,8 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
             return False
         with open(pdf_path, 'rb') as attachment:
             part = MIMEBase('application', 'octet-stream')
-            part.set_payload(attachment.read())
+            pdf_bytes_for_log = attachment.read()
+            part.set_payload(pdf_bytes_for_log)
         
         encoders.encode_base64(part)
         # Določi ime PDF datoteke
@@ -258,7 +282,21 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
             f'attachment; filename= {pdf_filename}'
         )
         msg.attach(part)
-        
+
+        # AUDIT kontekst za outbound_email_log (order_number None = ročno pošiljanje).
+        log_ctx = {
+            'email_type': 'manual_declaration' if order_number is None else 'declaration',
+            'recipient_to': recipient_email,
+            'recipient_bcc': bcc_admin if use_admin_bcc else None,
+            'subject': msg.get('Subject'),
+            'from_email': from_email,
+            'from_name': sender_name,
+            'html_content': email_content,
+            'attachment_name': pdf_filename,
+            'attachment_content': pdf_bytes_for_log,
+            'order_number': None if order_number is None else str(order_number),
+        }
+
         # Pošlji email
         with smtplib.SMTP(smtp_server, smtp_port) as server:
             server.starttls()
@@ -266,6 +304,16 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
             server.send_message(msg)
         
         current_app.logger.info(f"Email uspešno poslan na {recipient_email} za naročilo {order_number}")
+
+        # AUDIT: zabeleži uspešno poslan e-mail (non-fatal).
+        try:
+            from services.outbound_email_log import log_outbound_email
+            log_outbound_email(
+                channel='flask', status='sent',
+                attachment_mime='application/pdf', **log_ctx
+            )
+        except Exception:
+            pass
         try:
             app_log('email.send_declaration', 'info', 'Declaration email sent', {
                 'order_number': order_number,
@@ -361,10 +409,12 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
     except smtplib.SMTPAuthenticationError as e:
         current_app.logger.error(f"SMTP napaka: {e}")
         current_app.logger.error(f"SMTP napaka tip: {type(e)}")
+        _log_email_send_error(locals().get('log_ctx'), e)
         raise e
     except smtplib.SMTPServerDisconnected as e:
         current_app.logger.error(f"SMTP napaka: Connection unexpectedly closed")
         current_app.logger.error(f"SMTP napaka tip: {type(e)}")
+        _log_email_send_error(locals().get('log_ctx'), e)
         raise e
     except Exception as e:
         current_app.logger.error(f"KRITIČNA NAPAKA v poslji_email_s_pdf: {e}")
@@ -376,6 +426,7 @@ def poslji_email_s_pdf(recipient_email, order_number, shopify_order_id, pdf_path
             })
         except Exception:
             pass
+        _log_email_send_error(locals().get('log_ctx'), e)
         current_app.logger.error(f"Stack trace: {traceback.format_exc()}")
         raise e
 
