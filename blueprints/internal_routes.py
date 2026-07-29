@@ -27,6 +27,8 @@ Endpoints:
          Klikni iz UI ko vneses novo serijo / popraviš INCI.
   GET  /api/internal/safety-net/blocked
        - Seznam vseh trenutno blokiranih naročil (admin pregled).
+  POST /api/internal/parfum/<parfum_id>/stock-status
+       - Nastavi `parfumi.na_zalogi` in potisne GREEN/RED tag v Shopify.
 """
 from __future__ import annotations
 
@@ -1416,6 +1418,98 @@ def manual_pdf():
         )
     except Exception as e:
         current_app.logger.error(f"/api/internal/manual/pdf error: {e}")
+        return jsonify({'ok': False, 'error': str(e)}), 500
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
+
+
+@internal_bp.route('/parfum/<int:parfum_id>/stock-status', methods=['POST'])
+def parfum_stock_status(parfum_id: int):
+    """Nastavi status zaloge parfuma (app-v2 → Flask).
+
+    Body: { "na_zalogi": bool }
+
+    Ekvivalent session-zaščitenega `/api/parfum/<id>/stock-status`. Outbound
+    tag-sync (GREEN/RED + metafield `data.status`) namenoma ostaja v Flasku,
+    zato app-v2 kliče to pot namesto da bi sam pisal v Shopify.
+
+    Shopify je vodilni le pri branju — če push ne uspe, `na_zalogi` NE
+    spremenimo, da baza in Shopify ne razideta.
+    """
+    if not _is_authorized():
+        return _unauthorized()
+    data = request.get_json(silent=True) or {}
+    if 'na_zalogi' not in data:
+        return jsonify({'ok': False, 'error': 'Manjka polje na_zalogi.'}), 400
+    na_zalogi = bool(data.get('na_zalogi'))
+
+    db = get_db(background=True)
+    cursor = db.cursor()
+    try:
+        cursor.execute(
+            """
+            SELECT p.product_no, p.proizvajalec_id, p.sinhroniziraj_s_shopify,
+                   p.ime_parfuma, pr.ime AS proizvajalec_ime
+            FROM parfumi p
+            JOIN proizvajalci pr ON pr.id = p.proizvajalec_id
+            WHERE p.id = %s
+            """,
+            (parfum_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'ok': False, 'error': 'Parfum ni najden.'}), 404
+
+        shopify_msg = 'Sinhronizacija s Shopify je za ta parfum izklopljena.'
+        if row['sinhroniziraj_s_shopify']:
+            from services.shopify_service import (
+                find_shopify_product_gid,
+                update_stock_status_in_shopify,
+            )
+
+            gid, find_msg = find_shopify_product_gid(
+                str(row['product_no']).strip(), row['proizvajalec_id']
+            )
+            if not gid:
+                return jsonify({
+                    'ok': False,
+                    'error': f"Izdelka ni bilo mogoče najti v Shopify: {find_msg}",
+                }), 400
+
+            sync_ok, shopify_msg = update_stock_status_in_shopify(gid, na_zalogi)
+            if not sync_ok:
+                return jsonify({
+                    'ok': False,
+                    'error': f"Shopify ni sprejel spremembe: {shopify_msg}. Zaloga ni spremenjena.",
+                }), 502
+
+        cursor.execute(
+            "UPDATE parfumi SET na_zalogi = %s WHERE id = %s",
+            (na_zalogi, parfum_id),
+        )
+        db.commit()
+
+        current_app.logger.info(
+            f"stock-status: parfum {parfum_id} ({row['product_no']} · {row['ime_parfuma']}) "
+            f"→ na_zalogi={na_zalogi}; shopify: {shopify_msg}"
+        )
+        return jsonify({
+            'ok': True,
+            'parfum_id': parfum_id,
+            'na_zalogi': na_zalogi,
+            'shopify': shopify_msg,
+        })
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        current_app.logger.error(
+            f"/api/internal/parfum/{parfum_id}/stock-status error: {e}", exc_info=True
+        )
         return jsonify({'ok': False, 'error': str(e)}), 500
     finally:
         try:
