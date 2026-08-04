@@ -7,6 +7,7 @@
 .env.txt
 .env.local
 .env.*
+.neon-owner.url
 
 # Zacasne in build mape
 .cache/
