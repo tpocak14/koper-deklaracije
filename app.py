@@ -56,7 +56,11 @@ def create_app():
     app.register_blueprint(stats_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(internal_bp)
-    
+
+    # 5b. Machine-only: UI/login/session API so zaprti (v2 je edini frontend).
+    from machine_only import register_machine_only_gate
+    register_machine_only_gate(app)
+
     # 6. Naredi funkcije za preverjanje dovoljenj globalno dostopne
     from blueprints.auth_routes import has_permission, require_permission
     app.jinja_env.globals['has_permission'] = has_permission
