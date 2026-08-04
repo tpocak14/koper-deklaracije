@@ -114,7 +114,20 @@ def create_app():
             lj = ZoneInfo("Europe/Ljubljana")
         except Exception:
             lj = None
-        scheduler.add_job(daily_declarations_job, 'cron', hour=21, minute=0, timezone=lj)
+        # Kill switch za cutover na v2 DECL_BATCH_FULL:
+        #   heroku config:set DISABLE_DAILY_DECLARATIONS_JOB=1
+        _disable_daily_decl = (
+            (os.environ.get('DISABLE_BG_JOBS', '') or '').strip().lower() in ('1', 'true', 'yes')
+            or (os.environ.get('DISABLE_DAILY_DECLARATIONS_JOB', '') or '').strip().lower()
+            in ('1', 'true', 'yes')
+        )
+        if not _disable_daily_decl:
+            scheduler.add_job(daily_declarations_job, 'cron', hour=21, minute=0, timezone=lj)
+        else:
+            app.logger.warning(
+                "daily_declarations_job DISABLED via env "
+                "(DISABLE_BG_JOBS / DISABLE_DAILY_DECLARATIONS_JOB)"
+            )
 
         # Hourly reconciliation to ensure no fulfilled order is missing declaration/MK upload
         def declaration_reconcile_job():
