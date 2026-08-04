@@ -1815,6 +1815,54 @@ def required_permission_for(method: str, path: str):
 
     return None
 
+def _is_active_admin() -> bool:
+    """Sveža admin preverba iz baze (ne zaupa zastareli seji)."""
+    uid = session.get('user_id')
+    if not uid:
+        return False
+    db = None
+    cursor = None
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            "SELECT role FROM users WHERE id = %s AND is_active = TRUE",
+            (uid,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False
+        return str(row.get('role') if isinstance(row, dict) else row[0]).strip().lower() == 'admin'
+    except Exception as e:
+        current_app.logger.error(f"_is_active_admin error: {e}")
+        return False
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
+
+
+def _scrub_secrets(obj):
+    """Odstrani skrivnosti iz struktur, preden jih zapišemo v loge."""
+    redact_keys = {
+        'secret', 'secret_key', 'password', 'token', 'api_key',
+        'authorization', 'access_token', 'refresh_token', 'x-mk-secret',
+    }
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if str(k).lower() in redact_keys:
+                out[k] = '[REDACTED]'
+            else:
+                out[k] = _scrub_secrets(v)
+        return out
+    if isinstance(obj, list):
+        return [_scrub_secrets(i) for i in obj]
+    return obj
+
+
 @api_bp.before_request
 def enforce_permissions():
     """Globalno uveljavi dovoljenja za API poti."""
@@ -1829,10 +1877,8 @@ def enforce_permissions():
     if 'user_id' not in session:
         return jsonify({'success': False, 'error': 'Uporabnik ni prijavljen'}), 401
 
-    # Admin samo po vlogi v seji (NE po uporabniškem imenu — to je bil bypass).
-    role_norm_user_obj = str(session.get('user', {}).get('role', '')).strip().lower()
-    role_norm_flat = str(session.get('role', '')).strip().lower()
-    if role_norm_user_obj == 'admin' or role_norm_flat == 'admin':
+    # Admin: živa preverba iz baze (demotion/deaktivacija takoj velja)
+    if _is_active_admin():
         return None
 
     # Posebna obravnava za shranjevanje parfuma: pri posodobitvi dovoli tudi delna dovoljenja
@@ -1854,10 +1900,16 @@ def enforce_permissions():
         '/api/merge-perfumes',
         '/api/fix-user-permissions',
         '/api/init-db',
+        '/api/migrate-perfumes',
+        '/api/dodaj-iz-excel',
+        '/api/download-excel',
+        '/api/setup-s3-cors',
+        '/api/process-unprocessed-fulfilled-orders',
+        '/api/serije/rebind',
+        '/api/mk/import-order',
     }
     if path in DANGEROUS_UNMAPPED or path.startswith('/api/admin/'):
-        if role_norm_user_obj != 'admin' and role_norm_flat != 'admin':
-            return jsonify({'success': False, 'error': 'Samo administrator'}), 403
+        return jsonify({'success': False, 'error': 'Samo administrator'}), 403
 
     perm = required_permission_for(method, path)
     if not perm:
@@ -2525,23 +2577,20 @@ def mk_retail_inspect_items_secret():
 @api_bp.route('/mk/webhook/stock', methods=['POST'])
 def mk_webhook_stock():
     try:
-        provided = (
-            request.headers.get('X-MK-Secret')
-            or request.args.get('secret')
-            or (request.get_json(silent=True) or {}).get('secret')
-            or ''
-        )
+        # Secret samo iz headerja (ne body/query — query gre v loge, body se shranjuje)
+        provided = request.headers.get('X-MK-Secret') or ''
         # Fail-closed: brez nastavljenega secret-a ali ob neujemanju → 401
         if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         body = request.get_json(silent=True) or {}
-        # Log receive
+        safe_body = _scrub_secrets(body)
+        # Log receive (brez skrivnosti)
         try:
             from services.mk_service import app_log
-            app_log('webhook.mk_stock', 'info', 'Received MK stock webhook', {'payload': body})
+            app_log('webhook.mk_stock', 'info', 'Received MK stock webhook', {'payload': safe_body})
         except Exception:
             pass
-        mk_log_stock_event(body)
+        mk_log_stock_event(safe_body)
         # extract SKUs
         skus_set = set()
         if isinstance(body, dict):
@@ -7268,10 +7317,12 @@ def login():
         # Normaliziraj vlogo (za UI in backend bypass)
         role_normalized = str(user['role']).strip().lower() if user.get('role') is not None else ''
 
-        # Nastavi Flask session
+        # Nastavi Flask session (permanent → PERMANENT_SESSION_LIFETIME velja)
+        session.permanent = True
         session['logged_in'] = True
         session['user_id'] = user['id']
         session['username'] = user['username']
+        session['role'] = role_normalized
         session['user'] = {
             'id': user['id'],
             'username': user['username'],
@@ -7897,58 +7948,59 @@ def set_prepared_by(order_id: int):
         return jsonify({ 'success': False, 'error': str(e) }), 500
 @api_bp.route('/change-password', methods=['POST'])
 def change_password():
-    """Spremeni geslo uporabnika."""
+    """Spremeni geslo trenutno prijavljenega uporabnika (NE zaupa body.username)."""
+    cursor = None
     try:
-        data = request.get_json()
-        username = data.get('username')
+        uid = session.get('user_id')
+        if not uid:
+            return jsonify({'success': False, 'error': 'Uporabnik ni prijavljen'}), 401
+
+        data = request.get_json(silent=True) or {}
         current_password = data.get('current_password')
         new_password = data.get('new_password')
-        
-        if not all([username, current_password, new_password]):
+
+        if not current_password or not new_password:
             return jsonify({'success': False, 'error': 'Vsi podatki so obvezni'}), 400
-        
-        if len(new_password) < 6:
-            return jsonify({'success': False, 'error': 'Novo geslo mora biti dolgo vsaj 6 znakov'}), 400
-        
+
+        if len(str(new_password)) < 12:
+            return jsonify({'success': False, 'error': 'Novo geslo mora biti dolgo vsaj 12 znakov'}), 400
+
         db = get_db()
         cursor = db.cursor()
-        
-        # Poišči uporabnika
         cursor.execute("""
             SELECT id, password_hash, is_active
-            FROM users WHERE username = %s
-        """, (username,))
-        
+            FROM users WHERE id = %s
+        """, (uid,))
         user = cursor.fetchone()
-        
-        if not user:
-            return jsonify({'success': False, 'error': 'Uporabnik ne obstaja'}), 404
-        
-        if not user['is_active']:
-            return jsonify({'success': False, 'error': 'Uporabniški račun je deaktiviran'}), 401
-        
-        # Preveri trenutno geslo
-        if not check_password_hash(user['password_hash'], current_password):
-            return jsonify({'success': False, 'error': 'Napačno trenutno geslo'}), 401
-        
-        # Posodobi geslo
+
+        # Enotna napaka — brez enumeracije / oraklja po username
+        if (
+            not user
+            or not user['is_active']
+            or not check_password_hash(user['password_hash'], current_password)
+        ):
+            return jsonify({'success': False, 'error': 'Napačno geslo'}), 401
+
         new_password_hash = generate_password_hash(new_password)
         cursor.execute("""
             UPDATE users SET password_hash = %s WHERE id = %s
         """, (new_password_hash, user['id']))
-        
         db.commit()
 
         return jsonify({
             'success': True,
             'message': 'Geslo uspešno spremenjeno'
         })
-        
+
     except Exception as e:
         current_app.logger.error(f"Napaka pri spreminjanju gesla: {e}")
         return jsonify({'success': False, 'error': 'Napaka pri spreminjanju gesla'}), 500
     finally:
-        cursor.close()
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
 @api_bp.route('/admin/change-user-password', methods=['POST'])
 def admin_change_user_password():

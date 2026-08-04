@@ -55,25 +55,45 @@ _MK_PDF_LOCALE_BY_CC = {
 }
 
 
+def _is_active_admin() -> bool:
+    """Sveža admin preverba iz baze."""
+    uid = session.get('user_id')
+    if not uid:
+        return False
+    try:
+        db = get_db()
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT role FROM users WHERE id = %s AND is_active = TRUE",
+                (uid,),
+            )
+            row = c.fetchone()
+            if not row:
+                return False
+            role = row['role'] if isinstance(row, dict) else row[0]
+            return str(role or '').strip().lower() == 'admin'
+        finally:
+            c.close()
+    except Exception:
+        return False
+
+
 def _is_authorized() -> bool:
-    """Allow if admin session (role) OR shared CRON_SECRET matches."""
+    """Allow if live admin session OR shared CRON_SECRET (header only)."""
     import hmac as hmac_lib
     try:
-        if session.get('user_id'):
-            role = str(
-                session.get('user', {}).get('role') or session.get('role') or ''
-            ).strip().lower()
-            if role == 'admin':
-                return True
+        if _is_active_admin():
+            return True
     except Exception:
         pass
     secret = (os.environ.get('CRON_SECRET') or current_app.config.get('CRON_SECRET') or '').strip()
     if not secret:
         return False
+    # Query string namerno ni podprt — gre v router loge / Referer.
     provided = (
         request.headers.get('X-Cron-Secret')
         or (request.headers.get('Authorization') or '').replace('Bearer ', '').strip()
-        or request.args.get('secret', '').strip()
     )
     if not provided:
         return False

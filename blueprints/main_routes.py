@@ -267,16 +267,46 @@ def _fetch_inspired_image_url(shop_domain: str, product_id: str) -> str | None:
     return None
 
 
+def _is_allowed_inspired_image_url(url: str) -> bool:
+    """Dovoli samo Shopify CDN / shop hoste — prepreči SSRF prek metafield vrednosti."""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(url)
+    except Exception:
+        return False
+    if p.scheme != "https" or not p.hostname:
+        return False
+    host = p.hostname.lower()
+    if host == "cdn.shopify.com" or host.endswith(".shopify.com"):
+        return True
+    if host.endswith(".myshopify.com"):
+        return True
+    return False
+
+
 @main_bp.route('/apps/deklaracije/inspired-image')
 def inspired_image_proxy():
     product_id = (request.args.get('product_id') or '').strip()
-    shop_domain = _resolve_shop_domain_from_request()
+    raw_shop = _resolve_shop_domain_from_request()
+    shop_domain = _normalize_shop_domain(raw_shop)
     width = (request.args.get('width') or '').strip()
     if not product_id or not shop_domain:
         return Response("Missing product_id or shop", status=400)
+    # Neznan shop ne sme sprožiti klica z default tokenom
+    try:
+        store = get_shopify_store_config(shop_domain)
+        shop_name = (current_app.config.get("SHOP_NAME") or "").strip().lower()
+        default_sd = f"{shop_name}.myshopify.com" if shop_name else None
+        if not store and shop_domain != default_sd:
+            return Response("Unknown shop", status=400)
+    except Exception:
+        return Response("Unknown shop", status=400)
     try:
         url = _fetch_inspired_image_url(shop_domain, product_id)
         if not url:
+            return Response("Not found", status=404)
+        if not _is_allowed_inspired_image_url(url):
+            current_app.logger.warning("inspired_image blocked non-Shopify URL host")
             return Response("Not found", status=404)
         if width.isdigit():
             sep = '&' if '?' in url else '?'
@@ -295,7 +325,7 @@ def inspired_image_proxy():
                     'X-Robots-Tag': 'noindex, nofollow, noimageindex',
                 }
             )
-        img_resp = requests.get(url, timeout=(3, 7))
+        img_resp = requests.get(url, timeout=(3, 7), allow_redirects=False)
         if img_resp.status_code != 200:
             return Response("Upstream error", status=502)
         content = img_resp.content

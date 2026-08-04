@@ -686,43 +686,26 @@ def sync_all_product_tags_from_metafields(shop_domain: str, sleep_seconds: float
 
 @webhook_bp.route('/order-created', methods=['POST'])
 def handle_order_created_webhook():
-    """Preusmeritev za stari webhook URL"""
-    current_app.logger.info("=== ORDER-CREATED WEBHOOK PRIMLJEN ===")
-    current_app.logger.info(f"Headers: {dict(request.headers)}")
-    current_app.logger.info(f"Data: {request.get_data()}")
-    current_app.logger.info("Preusmerjam na glavni webhook handler")
+    """Preusmeritev za stari webhook URL (brez logiranja headerjev/telesa pred HMAC)."""
     try:
-        result = handle_shopify_webhook()
-        current_app.logger.info("Glavni webhook handler uspešno izveden")
-        return result
+        return handle_shopify_webhook()
     except Exception as e:
         current_app.logger.error(f"Napaka v glavnem webhook handler-ju: {e}")
-        import traceback
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 200
+        return jsonify({"status": "error", "message": "webhook error"}), 200
 
 @webhook_bp.route('/order-fulfilled', methods=['POST'])
 def handle_order_fulfilled_webhook():
     """Preusmeritev za order-fulfilled webhook URL"""
-    current_app.logger.info("Order-fulfilled webhook URL prejet, preusmerjam na novi")
-    current_app.logger.info(f"Headers: {dict(request.headers)}")
-    current_app.logger.info(f"Data: {request.get_data()}")
     return handle_shopify_webhook()
 
 @webhook_bp.route('/order-updated', methods=['POST'])
 def handle_order_updated_webhook():
     """Preusmeritev za order-updated webhook URL"""
-    current_app.logger.info("Order-updated webhook URL prejet, preusmerjam na novi")
-    current_app.logger.info(f"Headers: {dict(request.headers)}")
-    current_app.logger.info(f"Data: {request.get_data()}")
     return handle_shopify_webhook()
 
 @webhook_bp.route('/product-update', methods=['POST'])
 def handle_product_update_webhook():
     """Preusmeritev za product-update webhook URL"""
-    current_app.logger.info("Product-update webhook URL prejet, preusmerjam na novi")
-    current_app.logger.info(f"Headers: {dict(request.headers)}")
-    current_app.logger.info(f"Data: {request.get_data()}")
     # Defer tag sync to background to avoid H12 timeouts
     try:
         app = current_app._get_current_object()

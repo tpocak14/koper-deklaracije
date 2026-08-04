@@ -4,6 +4,7 @@ import time
 import traceback
 import json
 import os
+import re
 import threading
 from database import get_db
 
@@ -12,17 +13,24 @@ _product_metafields_cache = {}
 _cache_expiry_time = 300  # 5 minut
 _cache_last_cleared = 0
 
+# Samo veljavni myshopify hosti — zavrne '/', '#', '?', ':', '@' (SSRF / token leak).
+_SHOP_DOMAIN_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,58}[a-z0-9]\.myshopify\.com$")
+
 
 def _normalize_shop_domain(shop_domain: str | None) -> str | None:
     if not shop_domain:
         return None
-    sd = shop_domain.strip()
+    sd = shop_domain.strip().lower()
     if sd.startswith("https://"):
         sd = sd.replace("https://", "", 1)
     if sd.startswith("http://"):
         sd = sd.replace("http://", "", 1)
+    # Odstrani morebitno pot/query, če je prišlo v query string
+    sd = sd.split("/")[0].split("?")[0].split("#")[0].split(":")[0]
     if not sd.endswith(".myshopify.com"):
         sd = f"{sd}.myshopify.com"
+    if not _SHOP_DOMAIN_RE.match(sd):
+        return None
     return sd
 
 
@@ -122,24 +130,42 @@ def get_shopify_webhook_secret(shop_domain: str | None) -> str | None:
     return current_app.config.get('SHOPIFY_WEBHOOK_SECRET') or current_app.config.get('SHOPIFY_APP_CLIENT_SECRET')
 
 def _get_shopify_headers(shop_domain: str | None = None):
-    """Pridobi glavo za avtentikacijo pri Shopify API."""
+    """Pridobi glavo za avtentikacijo pri Shopify API.
+
+    Če je podan shop_domain, mora biti znan store — sicer ne smeš pasti
+    na privzeti SHOPIFY_API_PASSWORD (to bi uhajalo token na tuj host).
+    """
     token = None
-    store = get_shopify_store_config(shop_domain)
-    if store:
-        token = store.get('access_token')
-    if not token:
-        token = current_app.config.get('SHOPIFY_API_PASSWORD')
+    if shop_domain:
+        sd = _normalize_shop_domain(shop_domain)
+        if not sd:
+            raise ValueError("Neveljavna Shopify domena")
+        store = get_shopify_store_config(sd)
+        if not store or not store.get("access_token"):
+            # Dovoli privzeti shop iz env (SHOP_NAME), drugače zavrni.
+            shop_name = (current_app.config.get("SHOP_NAME") or "").strip().lower()
+            default_sd = f"{shop_name}.myshopify.com" if shop_name else None
+            if default_sd and sd == default_sd:
+                token = current_app.config.get("SHOPIFY_API_PASSWORD")
+            else:
+                raise ValueError("Neznana Shopify domena")
+        else:
+            token = store.get("access_token")
+    else:
+        token = current_app.config.get("SHOPIFY_API_PASSWORD")
     if not token:
         raise ValueError("Konfiguracijska spremenljivka SHOPIFY_API_PASSWORD ni nastavljena!")
-        
+
     return {
         "Content-Type": "application/json",
-        "X-Shopify-Access-Token": token
+        "X-Shopify-Access-Token": token,
     }
 
 def _get_api_url(endpoint="graphql.json", shop_domain: str | None = None):
     """Sestavi URL za Shopify API."""
-    sd = _normalize_shop_domain(shop_domain)
+    sd = _normalize_shop_domain(shop_domain) if shop_domain else None
+    if shop_domain and not sd:
+        raise ValueError("Neveljavna Shopify domena")
     api_version = os.environ.get('SHOPIFY_API_VERSION') or current_app.config.get('SHOPIFY_API_VERSION', '2025-01')
     if sd:
         return f"https://{sd}/admin/api/{api_version}/{endpoint}"
