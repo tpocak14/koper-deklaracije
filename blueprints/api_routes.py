@@ -1646,10 +1646,7 @@ ALLOWED_PUBLIC_PATHS = {
     ('HEAD', '/api/health'),  # JS pinga /api/health preko HEAD za online/offline preverjanje
     ('OPTIONS', '/api/health'),
     ('GET', '/api/current-user'),  # vrne podatke o trenutnem uporabniku po seji
-    ('GET', '/api/email-mode'),
-    ('GET', '/api/instructions'),
-    ('GET', '/api/instruction-categories'),
-    # MetaKocka stock webhook (avtorizirano preko X-MK-Secret)
+    # MetaKocka stock webhook (avtorizirano preko X-MK-Secret — fail-closed)
     ('POST', '/api/mk/webhook/stock'),
     ('POST', '/api/mk/sync-bills/secret'),
     ('GET', '/api/mk/sync-bills/status/secret'),
@@ -1832,11 +1829,10 @@ def enforce_permissions():
     if 'user_id' not in session:
         return jsonify({'success': False, 'error': 'Uporabnik ni prijavljen'}), 401
 
-    # Admin ima vsa dovoljenja (normalizirano, da se izognemo razlikam v zapisu)
-    username_norm = str(session.get('username', '')).strip().lower()
+    # Admin samo po vlogi v seji (NE po uporabniškem imenu — to je bil bypass).
     role_norm_user_obj = str(session.get('user', {}).get('role', '')).strip().lower()
     role_norm_flat = str(session.get('role', '')).strip().lower()
-    if username_norm == 'admin' or role_norm_user_obj == 'admin' or role_norm_flat == 'admin':
+    if role_norm_user_obj == 'admin' or role_norm_flat == 'admin':
         return None
 
     # Posebna obravnava za shranjevanje parfuma: pri posodobitvi dovoli tudi delna dovoljenja
@@ -1852,9 +1848,20 @@ def enforce_permissions():
             )
             return jsonify({'success': False, 'error': 'Nimate dovoljenja za to akcijo'}), 403
 
+    # Eksplicitno nevarne admin akcije, ki so bile prej odprte vsakemu prijavljenemu.
+    DANGEROUS_UNMAPPED = {
+        '/api/cleanup-duplicate-perfumes',
+        '/api/merge-perfumes',
+        '/api/fix-user-permissions',
+        '/api/init-db',
+    }
+    if path in DANGEROUS_UNMAPPED or path.startswith('/api/admin/'):
+        if role_norm_user_obj != 'admin' and role_norm_flat != 'admin':
+            return jsonify({'success': False, 'error': 'Samo administrator'}), 403
+
     perm = required_permission_for(method, path)
     if not perm:
-        # Ni eksplicitno zaščiteno - pusti delovati kot doslej
+        # Še ni mapirano — pusti (kompatibilnost). Nevarne poti so zgoraj.
         return None
 
     if perm and not has_permission(perm):
@@ -2165,14 +2172,27 @@ def mk_send_invoice():
         return jsonify({'success': False, 'error': 'Napaka pri pošiljanju računa.'}), 500
 
 
+def _mk_secret_ok(provided) -> bool:
+    """Fail-closed primerjava MK_WEBHOOK_SECRET (timing-safe)."""
+    import hmac as hmac_lib
+    secret_cfg = (
+        current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET') or ''
+    ).strip()
+    if not secret_cfg or provided is None:
+        return False
+    try:
+        return hmac_lib.compare_digest(str(provided), str(secret_cfg))
+    except (TypeError, ValueError):
+        return False
+
+
 # Ročni sprožilec: MK sync bills (admin‑only via permission)
 @api_bp.route('/mk/sync-bills', methods=['POST'])
 def mk_sync_bills_endpoint():
     # allow secret override (same as webhook secret)
     body_try = request.get_json(silent=True) or {}
-    secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
     provided = request.headers.get('X-MK-Secret') or request.args.get('secret') or body_try.get('secret')
-    secret_ok = bool(secret_cfg and provided == secret_cfg)
+    secret_ok = _mk_secret_ok(provided)
     perm = required_permission_for('POST', '/api/procurement/vendors/import')  # reuse admin-like perm
     if not secret_ok:
         if perm and not has_permission(perm):
@@ -2264,10 +2284,9 @@ def mk_sync_bills_endpoint():
 @api_bp.route('/mk/sync-bills/secret', methods=['POST'])
 def mk_sync_bills_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         body = request.get_json(silent=True) or {}
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret') or body.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         days = int(body.get('days', 7))
         types = body.get('doc_types') if isinstance(body.get('doc_types'), list) else ['sales_bill_retail']
@@ -2303,9 +2322,8 @@ def mk_sync_bills_secret():
 @api_bp.route('/mk/sync-bills/status/secret', methods=['GET'])
 def mk_sync_bills_status_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         res = current_app.config.get('MK_SYNC_LAST_RESULT') or {'status': 'idle'}
         progress = current_app.config.get('MK_SYNC_PROGRESS') or {}
@@ -2319,10 +2337,9 @@ def mk_sync_bills_status_secret():
 @api_bp.route('/mk/retail/delta/secret', methods=['POST'])
 def mk_retail_delta_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         body = request.get_json(silent=True) or {}
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret') or body.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         try:
             hours = int(body.get('hours', 24))
@@ -2357,10 +2374,9 @@ def mk_retail_delta_secret():
 @api_bp.route('/mk/retail/change-delta/secret', methods=['POST'])
 def mk_retail_change_delta_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         body = request.get_json(silent=True) or {}
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret') or body.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         try:
             days_back = int(body.get('days_back', 3))
@@ -2386,10 +2402,9 @@ def mk_retail_change_delta_secret():
 @api_bp.route('/mk/retail/import-by-ids/secret', methods=['POST'])
 def mk_retail_import_by_ids_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         body = request.get_json(silent=True) or {}
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret') or body.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         mk_ids = body.get('mk_ids') if isinstance(body.get('mk_ids'), list) else []
         from services.mk_service import mk_import_retail_bills_by_ids
@@ -2414,10 +2429,9 @@ def mk_retail_import_by_ids_secret():
 @api_bp.route('/mk/retail/search/secret', methods=['POST'])
 def mk_retail_search_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         body = request.get_json(silent=True) or {}
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret') or body.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         hours = int(body.get('hours', 24))
         max_pages = int(body.get('max_pages', 50))
@@ -2446,9 +2460,8 @@ def mk_retail_search_secret():
 @api_bp.route('/mk/retail/status/secret', methods=['GET'])
 def mk_retail_status_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         res_delta = current_app.config.get('MK_RETAIL_DELTA_LAST_RESULT') or {'status': 'idle'}
         res_ids = current_app.config.get('MK_RETAIL_IDS_LAST_RESULT') or {'status': 'idle'}
@@ -2462,9 +2475,8 @@ def mk_retail_status_secret():
 @api_bp.route('/mk/retail/inspect/secret', methods=['GET'])
 def mk_retail_inspect_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         limit = max(1, min(50, int(request.args.get('limit', '20'))))
         from database import get_db
@@ -2487,9 +2499,8 @@ def mk_retail_inspect_secret():
 @api_bp.route('/mk/retail/inspect-items/secret', methods=['GET'])
 def mk_retail_inspect_items_secret():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
         provided = request.headers.get('X-MK-Secret') or request.args.get('secret')
-        if not secret_cfg or provided != secret_cfg:
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         mk_id = (request.args.get('mk_id') or '').strip()
         if not mk_id:
@@ -2514,9 +2525,14 @@ def mk_retail_inspect_items_secret():
 @api_bp.route('/mk/webhook/stock', methods=['POST'])
 def mk_webhook_stock():
     try:
-        secret_cfg = current_app.config.get('MK_WEBHOOK_SECRET') or os.environ.get('MK_WEBHOOK_SECRET')
-        provided = request.headers.get('X-MK-Secret') or request.args.get('secret') or (request.get_json(silent=True) or {}).get('secret')
-        if secret_cfg and provided != secret_cfg:
+        provided = (
+            request.headers.get('X-MK-Secret')
+            or request.args.get('secret')
+            or (request.get_json(silent=True) or {}).get('secret')
+            or ''
+        )
+        # Fail-closed: brez nastavljenega secret-a ali ob neujemanju → 401
+        if not _mk_secret_ok(provided):
             return jsonify({'success': False, 'error': 'Unauthorized'}), 401
         body = request.get_json(silent=True) or {}
         # Log receive
@@ -2901,10 +2917,12 @@ def check_serija_permissions(serija_id, action='read'):
             return {'allowed': False, 'reason': 'Uporabnik ni prijavljen', 'serija': None}
         
         current_user_id = session['user_id']
-        current_username = session.get('username', '')
-        
-        # Preveri, ali je admin
-        is_admin = current_username == 'admin'
+
+        # Admin samo po vlogi (ne po username — to je bil bypass)
+        role = str(
+            session.get('user', {}).get('role') or session.get('role') or ''
+        ).strip().lower()
+        is_admin = role == 'admin'
         
         db = get_db()
         cursor = db.cursor()
@@ -3955,15 +3973,6 @@ def check_shopify_fulfillment(shopify_order_id):
                 pass
 @api_bp.route('/narocila', methods=['GET'])
 def get_narocila():
-    # Admin mora vedno videti naročila
-    try:
-        username_norm = str(session.get('username', '')).strip().lower()
-        role_norm_user_obj = str(session.get('user', {}).get('role', '')).strip().lower()
-        role_norm_flat = str(session.get('role', '')).strip().lower()
-        if username_norm == 'admin' or role_norm_user_obj == 'admin' or role_norm_flat == 'admin':
-            pass
-    except Exception:
-        pass
     db = get_db()
     cursor = db.cursor()
     try:
@@ -5530,9 +5539,6 @@ def get_serije_for_perfume(perfume_id):
     cursor.close()
     
     # Dodaj informacije o dovoljenjih za vsako serijo
-    current_username = session.get('username', '')
-    is_admin = current_username == 'admin'
-    
     for serija in serije:
         if serija.get('rok_uporabe') is not None:
             serija['rok_uporabe'] = _to_iso(serija['rok_uporabe'])
@@ -7420,9 +7426,9 @@ def update_user_permissions(user_id):
         # Admin ima vedno vsa dovoljenja
         current_app.logger.info(f"Checking permissions - username: {username}, role: {role}, permissions: {permissions}")
         
-        if username == 'admin' or role == 'admin':
+        if str(role or '').strip().lower() == 'admin':
             has_edit_permission = True
-            current_app.logger.info(f"Admin user detected: {username}, has_edit_permission: {has_edit_permission}")
+            current_app.logger.info(f"Admin role detected: {username}, has_edit_permission: {has_edit_permission}")
         else:
             # Preveri, ali je permissions JSON string in ga parsiraj
             if isinstance(permissions, str):

@@ -1,4 +1,4 @@
-from flask import Blueprint, request, current_app, Response
+from flask import Blueprint, request, current_app, Response, session, jsonify
 from api.utils.responses import make_ok, make_err
 from database import get_db
 from services.stats_compute import compute_points
@@ -7,6 +7,14 @@ from datetime import datetime, timedelta, timezone
 import json
 
 stats_bp = Blueprint('stats', __name__, url_prefix='/api/stats')
+
+
+@stats_bp.before_request
+def _require_login():
+    """Statistika ni javna — zahteva prijavljeno sejo."""
+    if 'user_id' not in session:
+        return jsonify({'success': False, 'error': 'Uporabnik ni prijavljen'}), 401
+    return None
 
 
 def _parse_dates():

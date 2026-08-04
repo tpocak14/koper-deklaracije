@@ -65,10 +65,9 @@ def has_permission(permission):
         role = user_data.get('role') if isinstance(user_data, dict) else user_data[0]
         raw_permissions = user_data.get('permissions') if isinstance(user_data, dict) else user_data[1]
 
-        # Admin ima vsa dovoljenja (normaliziraj zapis vloge/uporabnika)
+        # Admin samo po vlogi v bazi (ne po uporabniškem imenu).
         normalized_role = str(role).strip().lower() if role is not None else ''
-        normalized_username = str(session.get('username', '')).strip().lower()
-        if normalized_role == 'admin' or normalized_username == 'admin':
+        if normalized_role == 'admin':
             return True
 
         # Parsiraj permissions (podpira JSONB kot list ali JSON string)

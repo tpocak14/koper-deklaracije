@@ -1132,31 +1132,31 @@ def handle_shopify_webhook():
     """
     import time
     current_app.logger.info("=== SHOPIFY WEBHOOK PRIMLJEN ===")
-    current_app.logger.info("Začenjam obdelavo webhook-a...")
-    current_app.logger.info(f"Headers: {dict(request.headers)}")
-    current_app.logger.info(f"Method: {request.method}")
-    current_app.logger.info(f"URL: {request.url}")
-    
-    # 1. Takoj preveri veljavnost klica.
+    # 1. Takoj preveri veljavnost klica (brez logiranja celotnih glav / HMAC).
     hmac_header = request.headers.get('X-Shopify-Hmac-Sha256')
     data = request.get_data()
     shop_domain = request.headers.get('X-Shopify-Shop-Domain') or request.args.get('shop')
+    current_app.logger.info(
+        "Shopify webhook: topic=%s shop=%s bytes=%s hmac=%s",
+        request.headers.get('X-Shopify-Topic'),
+        shop_domain,
+        len(data),
+        "yes" if hmac_header else "no",
+    )
     
-    current_app.logger.info(f"HMAC header: {hmac_header}")
-    current_app.logger.info(f"Data length: {len(data)} bytes")
-    
-    if hmac_header:
-        current_app.logger.info(f"HMAC header prisoten: {hmac_header}")
-        api_domain, matched_domain = _resolve_shop_domain_from_hmac(data, hmac_header, shop_domain)
-        if not api_domain:
-            current_app.logger.warning("Neveljaven webhook klic zavrnjen (napačen podpis ali manjkajoč secret).")
-            # Kljub napaki vrnemo 200, da Shopify ne pošilja znova. Napaka je zabeležena.
-            return jsonify({"status": "error", "message": "Invalid signature"}), 200
-        if shop_domain and matched_domain and shop_domain != matched_domain:
-            current_app.logger.info(f"webhook: domain mismatch {shop_domain} -> {matched_domain}")
-        shop_domain = api_domain
-    else:
-        current_app.logger.info("HMAC header manjka - nadaljujem brez preverjanja")
+    # HMAC je obvezen — brez podpisa ne obdelamo ničesar (prej je manjkajoč
+    # header pomenil odprt endpoint na skupni Neon bazi).
+    if not hmac_header:
+        current_app.logger.warning("Shopify webhook zavrnjen: manjka X-Shopify-Hmac-Sha256")
+        return jsonify({"status": "error", "message": "Missing signature"}), 401
+
+    api_domain, matched_domain = _resolve_shop_domain_from_hmac(data, hmac_header, shop_domain)
+    if not api_domain:
+        current_app.logger.warning("Shopify webhook zavrnjen: neveljaven podpis")
+        return jsonify({"status": "error", "message": "Invalid signature"}), 401
+    if shop_domain and matched_domain and shop_domain != matched_domain:
+        current_app.logger.info(f"webhook: domain mismatch {shop_domain} -> {matched_domain}")
+    shop_domain = api_domain
 
     # 2. Preberi minimalne podatke in obdelaj v ozadju.
     topic = request.headers.get('X-Shopify-Topic')

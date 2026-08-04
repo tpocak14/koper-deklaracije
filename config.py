@@ -6,8 +6,22 @@ load_dotenv()
 
 class Config:
     # --- Osnovne nastavitve ---
-    SECRET_KEY = os.getenv('SECRET_KEY', 'a_default_secret_key_for_development')
+    # V produkciji (Heroku DYNO) SECRET_KEY mora biti nastavljen — sicer boot pade.
+    _secret = os.getenv('SECRET_KEY', '').strip()
+    _default_dev_secret = 'a_default_secret_key_for_development'
+    if os.environ.get('DYNO') or os.getenv('FLASK_ENV') == 'production':
+        if not _secret or _secret == _default_dev_secret:
+            raise RuntimeError(
+                'SECRET_KEY mora biti nastavljen v produkciji (močan naključni niz).'
+            )
+    SECRET_KEY = _secret or _default_dev_secret
     DATABASE_URL = os.getenv('DATABASE_URL')
+
+    # Seja — utrjena pred CSRF / krajo piškotka
+    SESSION_COOKIE_HTTPONLY = True
+    SESSION_COOKIE_SAMESITE = 'Lax'
+    SESSION_COOKIE_SECURE = bool(os.environ.get('DYNO') or os.getenv('FLASK_ENV') == 'production')
+    PERMANENT_SESSION_LIFETIME = 60 * 60 * 12  # 12 ur
     
     # --- Shopify ---
     SHOP_NAME = os.getenv('SHOP_NAME', 'parfumerija-amour')

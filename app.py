@@ -522,6 +522,6 @@ def mk_sync_decl_uploads(days: int, limit: int, include_already: bool, order: tu
         click.echo(f"Napaka: {e}")
 
 if __name__ == '__main__':
-    # Zažene aplikacijo v razvojnem načinu
+    # Lokalni zagon — debug samo eksplicitno (nikoli privzeto True).
     port = int(os.getenv('PORT', 5001))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(host='0.0.0.0', port=port, debug=os.getenv('FLASK_DEBUG') == '1')

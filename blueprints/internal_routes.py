@@ -3,7 +3,7 @@
 Te poti so namenjene ad-hoc admin opravilom in cron klicem (npr. Heroku
 Scheduler, GitHub Actions, ročno preko curl). Vse zahtevajo eno od:
 
-  - veljavna admin Flask session (username == 'admin'), ali
+  - veljavna admin Flask session (role == 'admin'), ali
   - header `Authorization: Bearer <CRON_SECRET>` oz. query `?secret=...`
 
 Endpoints:
@@ -56,10 +56,15 @@ _MK_PDF_LOCALE_BY_CC = {
 
 
 def _is_authorized() -> bool:
-    """Allow if admin session OR shared CRON_SECRET matches."""
+    """Allow if admin session (role) OR shared CRON_SECRET matches."""
+    import hmac as hmac_lib
     try:
-        if session.get('user_id') and session.get('username') == 'admin':
-            return True
+        if session.get('user_id'):
+            role = str(
+                session.get('user', {}).get('role') or session.get('role') or ''
+            ).strip().lower()
+            if role == 'admin':
+                return True
     except Exception:
         pass
     secret = (os.environ.get('CRON_SECRET') or current_app.config.get('CRON_SECRET') or '').strip()
@@ -70,7 +75,12 @@ def _is_authorized() -> bool:
         or (request.headers.get('Authorization') or '').replace('Bearer ', '').strip()
         or request.args.get('secret', '').strip()
     )
-    return bool(provided) and provided == secret
+    if not provided:
+        return False
+    try:
+        return hmac_lib.compare_digest(str(provided), str(secret))
+    except (TypeError, ValueError):
+        return False
 
 
 def _unauthorized():
